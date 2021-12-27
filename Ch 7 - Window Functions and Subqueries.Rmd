@@ -1,0 +1,314 @@
+---
+title: "Chapter 7: Window Functions and Subqueries"
+output: html_notebook
+---
+
+# Setup the Database
+
+```{r setup}
+library(pacman)
+p_load(dplyr, DBI)
+
+# Create a database table in memory
+farmers.db <- 
+  dbConnect(RMariaDB::MariaDB(), 
+            group = "/Users/nickjenkins/Documents/Workshops & Conferences/SQL for Data Scientists/SQL for Data Scientists support files/FarmersMarketDatabase.sql",
+            username = "root",
+            password = "Hockeydude25",
+            host = "localhost",
+            port = 3306)
+```
+
+# Window Functions and Subqueries
+
+*Window functions* operate across multiple records but the records don't have to be grouped in the output. This gives the ability to put the values from one row of data into context compared to a group of rows, or partition, enabling an analyst to write queries that answer questions like: If the dataset were sorted, where would this row land in the results? How does a value in this row compare to a value in the prior row? How does a value in the current row compare to the average value for its group?
+
+Window functions return group aggregate calculations alongside individual row-level information for items in that group. They can also be used to rank or sort values within each group. For example, we could use window functions to get the date of the first purchase a person made at the farmers market, to be returned alongside their detailed purchase records, which could then be used to determine how long they had been a customer at the time each purchase was made.
+
+# `ROW_NUMBER`
+
+If you wanted to determine how much the most expensive product sold by each vendor costs, you could group the records in the `vendor_inventory` table by `vendor_id`, and return the maximum `original_price` value using the following query:
+
+```{sql connection = farmers.db}
+SELECT
+  vendor_id,
+  MAX(original_price) AS highest_price
+FROM farmers_market.vendor_inventory
+GROUP BY vendor_id
+ORDER BY vendor_id
+```
+
+If you wanted to know which item was the most expensive, how would you determine which `product_id` was associated with that `MAX(original_price)` per vendor?
+
+There is a window function that enables you to rank rows by a value called `ROW_NUMBER()`.
+
+```{sql fig-7.1, connection = farmers.db}
+SELECT
+  vendor_id,
+  market_date, 
+  product_id,
+  original_price,
+  ROW_NUMBER() OVER (PARTITION BY vendor_id ORDER BY original_price DESC) AS price_rank
+FROM farmers_market.vendor_inventory ORDER BY vendor_id, original_price DESC
+```
+
+The `ROW_NUMBER()` can be interpreted as "number the rows of inventory per vendor, sorted by original price, in descending order." The part inside the parentheses says how to apply the `ROW_NUMBER()` function. We're going to `PARTITION BY` `vendor_id` (you can think of this like a `GROUP BY` without actually combining the rows, so we're telling it how to split the rows intro groups without aggregating). Then within the partition, the `ORDER BY` indicates how to sort the rows. So, we'll sort the rows by price, high to low, within each `vendor_id` partition, and number each row.
+
+To return only the record of the highest-priced item per vendor, you can query the results of the previous query, and limit the output to the #1 ranked item per `vendor_id`.
+
+```{sql fig-7.2, connection = farmers.db}
+SELECT * 
+FROM
+(
+  SELECT
+    vendor_id, 
+    market_date,
+    product_id,
+    original_price,
+    ROW_NUMBER() OVER (PARTITION BY vendor_id ORDER BY original_price DESC) AS price_rank
+  FROM farmers_market.vendor_inventory
+  ORDER BY vendor_id
+) x
+WHERE x.price_rank = 1
+```
+
+# `RANK` and `DENSE_RANK`
+
+The `RANK` function numbers the results just like `ROW_NUMBER` does, but gives rows with the same value the same ranking. If we repeat the previous query with `RANK` instead of `RANK_QUERY`, we get the following output:
+
+```{sql fig-7.4, connection = farmers.db}
+SELECT
+  vendor_id,
+  market_date,
+  product_id,
+  original_price,
+  RANK() OVER (PARTITION BY vendor_id ORDER BY original_price DESC) AS price_rank
+FROM farmers_market.vendor_inventory
+ORDER BY vendor_id, original_price DESC
+```
+
+The `RANK` function skips rows when there is a tie in the ranking. To prevent this, you can use the `DENSE_RANK` function.
+
+# `NTILE`
+
+The `ROW_NUMBER()` and `RANK()` functions can help answer a question that asks something like "What are the top 10 items sold at the farmer's market, by price?" But what if you were asked to return the "top tenth" of the inventory, when sorted by price?
+
+```{sql connection = farmers.db}
+SELECT
+  vendor_id,
+  market_date,
+  product_id,
+  original_price, 
+  NTILE(10) OVER (ORDER BY original_price DESC) AS price_ntile
+FROM farmers_market.vendor_inventory
+ORDER BY original_price DESC
+```
+
+# Aggregate Window Functions
+
+Aggregate functions can be used in window functions. For example, what if you are a farmer selling products at the market, and you want to know which of your products were above the average price per product on each market date? We can use `AVG()` as a window function, partitioned by `market_date` and compare each product's price to that value.
+
+```{sql fig-7.5, connection = farmers.db}
+SELECT
+  vendor_id,
+  market_date,
+  product_id,
+  original_price,
+  AVG(original_price) OVER (PARTITION BY market_date ORDER BY market_date)
+    AS average_cost_product_by_market_date
+FROM farmers_market.vendor_inventory
+```
+
+*Note:* `PARTITION BY` works the same way as `group_by()` in R.
+
+Now let's wrap this query inside another query so we can compare the original price per item to the average cost of products on each market date that have been calculated by the window function.
+
+```{sql fig-7.6, connection = farmers.db}
+SELECT * FROM
+(
+  SELECT
+    vendor_id,
+    market_date,
+    product_id,
+    original_price,
+    ROUND(AVG(original_price) OVER (PARTITION BY market_date ORDER BY market_date), 2)
+      AS average_cost_product_by_market_date
+  FROM farmers_market.vendor_inventory
+) x
+WHERE x.vendor_id = 8
+  AND x.original_price > x.average_cost_product_by_market_date
+ORDER BY x.market_date, x.original_price DESC
+```
+
+Another use of an aggregate window function is to count how many items are in each partition. This query counts how many different products each vendor brought to market on each date, and displays that count on each row.
+
+```{sql fig-7.7, connection = farmers.db}
+SELECT
+  vendor_id,
+  market_date,
+  product_id,
+  original_price,
+  COUNT(product_id) OVER (PARTITION BY market_date, vendor_id)
+    AS vendor_prod_count
+FROM farmers_market.vendor_inventory
+ORDER BY vendor_id, market_date, original_price DESC
+```
+
+Aggregate window functions can also calculate running totals.
+
+```{sql fig-7.8, connection = farmers.db}
+SELECT
+  customer_id,
+  market_date,
+  vendor_id,
+  product_id,
+  quantity * cost_to_customer_per_qty AS price,
+  SUM(quantity * cost_to_customer_per_qty) OVER (ORDER BY market_date, transaction_time, customer_id, product_id) AS running_total_purchases
+FROM farmers_market.customer_purchases
+```
+
+This next query is partitioned by `customer_id` so each time we get to a new `customer_id`, the running total resets.
+
+```{sql fig-7.9, connection = farmers.db}
+SELECT
+  customer_id,
+  market_date,
+  vendor_id,
+  product_id,
+  quantity * cost_to_customer_per_qty AS price,
+  SUM(quantity * cost_to_customer_per_qty) OVER (PARTITION BY customer_id ORDER BY market_date, transaction_time, customer_id, product_id) AS running_total_purchases
+FROM farmers_market.customer_purchases
+```
+
+Without the `ORDER BY` clause in the `PARTITION`, the `SUM` is calculated across the entire partition, instead of as a per-row running total.
+
+```{sql fig-7.10, connection = farmers.db}
+SELECT
+  customer_id,
+  market_date,
+  vendor_id,
+  product_id,
+  quantity * cost_to_customer_per_qty AS price,
+  SUM(quantity * cost_to_customer_per_qty) OVER (PARTITION BY customer_id) AS running_total_purchases
+FROM farmers_market.customer_purchases
+```
+
+# `LAG` and `LEAD`
+
+`LAG` retrieves data from a row that is a selected number of rows back in the dataset.
+
+```{sql connection = farmers.db}
+SELECT
+  market_date,
+  vendor_id,
+  booth_number,
+  LAG(booth_number, 1) OVER (PARTITION BY vendor_id ORDER BY market_date, vendor_id)
+    AS previous_booth_number
+FROM farmers_market.vendor_booth_assignments
+ORDER BY market_date, vendor_id, booth_number
+```
+
+We might want to filter these query results to a specific market date to determine which vendors are new or changing booths that day, so we can contact them and ensure setup goes smoothly.
+
+```{sql fig-7.12, connection = farmers.db}
+SELECT * FROM
+(
+  SELECT
+    market_date,
+    vendor_id,
+    booth_number,
+    LAG(booth_number, 1) OVER (PARTITION BY vendor_id ORDER BY market_date, vendor_id)
+      AS previous_booth_number
+  FROM farmers_market.vendor_booth_assignments
+  ORDER BY market_date, vendor_id, booth_number
+) x
+WHERE x.market_date = "2019-04-10"
+  AND (x.booth_number <> x.previous_booth_number OR x.previous_booth_number IS NULL)
+```
+
+As another example, suppose we want to find out if the total sales on each market date are higher or lower than they were on the previous market date. First we need to get eh total sales per market date, using a `GROUP BY` and `SUM`.
+
+```{sql fig-7.13, connection = farmers.db}
+SELECT
+  market_date,
+  SUM(quantity * cost_to_customer_per_qty) AS market_date_total_sales
+FROM farmers_market.customer_purchases
+GROUP BY market_date
+ORDER BY market_date
+```
+
+Now we can add the `LAG()` window function to output the previous `market_date`'s calculated sum on each row. We order by `market_date` to ensure that the window function is using the previous date.
+
+```{sql fig-7.14, connection = farmers.db}
+SELECT
+  market_date,
+  SUM(quantity * cost_to_customer_per_qty) AS market_date_total_sales,
+  LAG(SUM(quantity * cost_to_customer_per_qty), 1) OVER (ORDER BY market_date) 
+    AS previous_market_date_total_sales
+FROM farmers_market.customer_purchases
+GROUP BY market_date
+ORDER BY market_date
+```
+
+# Exercises Using the Included Database
+
+1.  Do the following two steps:
+
+    1.  Write a query that selects from the `customer_purchases` table and numbers each customer's visits to the farmer's market (labeling each market date with a different number). Each customer's first visit is labeled 1, second visit is labeled 2, etc. (We are of course not counting visits where no purchases were made, because we have no record of those). You can either display all rows in the `customer_purchases` table, with the counter changing on each new market date for each customer, or select only the unique market dates per customer (without purchase details) and number those visits.
+
+    ```{sql ex1a, connection = farmers.db}
+    SELECT 
+      customer_id,
+      market_date,
+      ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY market_date) 
+        AS mkrt_visits
+    FROM farmers_market.customer_purchases
+    ```
+
+    2.  Reverse the numbering of the query from a part so each customer's most recent visit is labeled 1, then write another query that uses this one as a subquery and filters the results to only the customer's most recent visit.
+
+    ```{sql ex1b, connection = farmers.db}
+    SELECT 
+      customer_id,
+      market_date,
+      ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY market_date DESC) 
+        AS mkrt_visits
+    FROM farmers_market.customer_purchases
+    ```
+
+    ```{sql ex1c, connection = farmers.db}
+    SELECT * FROM
+    (
+      SELECT 
+        customer_id,
+        market_date,
+        ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY market_date DESC) 
+          AS mkrt_visits
+      FROM farmers_market.customer_purchases
+    ) x
+    WHERE x.mkrt_visits = 1
+    ```
+
+2.  Using a `COUNT()` window function, include a value along with each row of the `customer_purchses` table that indicates how many different times that customer has purchased that `product_id`.
+
+    ```{sql ex2, connection = farmers.db}
+    SELECT 
+      customer_id,
+      product_id,
+      COUNT(product_id) OVER (PARTITION BY customer_id, product_id) AS purchase_times
+    FROM farmers_market.customer_purchases
+    ORDER BY customer_id
+    ```
+
+3.  In the last query associated with Figure 7.14 from the chapter, we used `LAG` and sorted by `market_date`. Can you think of a way to use `LEAD` in place of `LAG`, but get the exact same output?
+
+    ```{sql connection = farmers.db}
+    SELECT
+      market_date,
+      SUM(quantity * cost_to_customer_per_qty) AS market_date_total_sales,
+      LEAD(SUM(quantity * cost_to_customer_per_qty), 1) OVER (ORDER BY market_date DESC) 
+        AS previous_market_date_total_sales
+    FROM farmers_market.customer_purchases
+    GROUP BY market_date
+    ORDER BY market_date
+    ```

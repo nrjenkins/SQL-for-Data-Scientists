@@ -1,0 +1,456 @@
+---
+title: "Chapter 6: Aggregating Results for Analysis"
+output: html_notebook
+---
+
+# Setup the Database
+
+```{r setup}
+library(pacman)
+p_load(dplyr, DBI)
+
+# Create a database table in memory
+farmers.db <- 
+  dbConnect(RMariaDB::MariaDB(), 
+            group = "/Users/nickjenkins/Documents/Workshops & Conferences/SQL for Data Scientists/SQL for Data Scientists support files/FarmersMarketDatabase.sql",
+            username = "root",
+            password = "Hockeydude25",
+            host = "localhost",
+            port = 3306)
+```
+
+# Aggregating Results for Analysis
+
+By using the `GROUP BY` statement, you can specify the level of summarization and then use aggregate functions to summarize values for the records in each group.
+
+# `GROUP BY` Syntax
+
+The two new sections of the select query are the `GROUP BY` and `HAVING` clauses:
+
+`SELECT [columns to return]`
+
+`FROM [table]`
+
+`WHERE [conditional filter statements]`
+
+`GROUP BY [columns to group on]`
+
+`HAVING [conditional filter statements that are run after grouping]`
+
+`ORDER BY [columns to sort on]`
+
+The `GROUP BY` keywords are followed by a comma-separated list of column names that indicate how you want to summarize the query results.
+
+Using what we've learned so far, we could write a query to get a list of customer IDs of customers who made purchases on each market date:
+
+```{sql connection = farmers.db}
+SELECT
+  market_date,
+  customer_id
+FROM farmers_market.customer_purchases
+ORDER BY market_date, customer_id
+```
+
+This shows one row per item that a customer purchased. To get one row per customer per market date, you can group the results by adding a `GROUP BY` clause that specifies that you want to summarize the results by the `customer_id` and `market_date` fields.
+
+```{sql connection = farmers.db}
+SELECT
+  market_date,
+  customer_id
+FROM farmers_market.customer_purchases
+GROUP BY market_date, customer_id
+ORDER BY market_date, customer_id
+```
+
+# Displaying Group Summaries
+
+With the data at the level you want, you can add aggregate functions like `SUM` and `COUNT` to return summaries of the `customer_purchases` data per group.
+
+```{sql cfig-6.1, connection = farmers.db}
+SELECT
+  market_date,
+  customer_id,
+  COUNT(*) AS items_purchased
+FROM farmers_market.customer_purchases
+GROUP BY market_date, customer_id
+ORDER BY market_date, customer_id
+LIMIT 10
+```
+
+To add up all quantities purchased, we can sum the quantity column:
+
+```{sql fig-6.2, connection = farmers.db}
+SELECT 
+  market_date,
+  customer_id,
+  SUM(quantity) AS items_purchased
+FROM farmers_market.customer_purchases
+GROUP BY market_date, customer_id
+ORDER BY market_date, customer_id
+```
+
+Use `DISTINCT` to count the number of unique purchases each customer made.
+
+```{sql fig-6.3, connection = farmers.db}
+SELECT
+  market_date,
+  customer_id,
+  COUNT(DISTINCT product_id) AS different_products_purchased
+FROM farmers_market.customer_purchases
+GROUP BY market_date, customer_id
+ORDER BY market_date, customer_id
+LIMIT 10
+```
+
+All of these summaries can also be combined into a single query
+
+```{sql fig-6.4, connection = farmers.db}
+SELECT
+  market_date,
+  customer_id,
+  SUM(quantity) AS items_purchased,
+  COUNT(DISTINCT product_id) AS different_products_purchased
+FROM farmers_market.customer_purchases
+GROUP BY market_date, customer_id
+ORDER BY market_date, customer_id
+LIMIT 10
+```
+
+# Performing Calculations Inside Aggregate Functions
+
+You can also include mathematical operations, which are calculated at the row level prior to summarization, inside the aggregate functions. The customer with ID 3 has purchased the following items:
+
+```{sql fig-6.5, connection = farmers.db}
+SELECT
+  market_date,
+  customer_id,
+  vendor_id,
+  quantity * cost_to_customer_per_qty AS price
+FROM farmers_market.customer_purchases
+WHERE customer_id = 3
+ORDER BY market_date, vendor_id
+```
+
+Now, let's say we wanted to know how much money this customer spent total on each `market_date`, regardless of item or vendor. We can `GROUP BY market_date`, and use the `SUM` aggregate function on the price calculation to add up the prices of the items purchased:
+
+```{sql fig-6.6, connection = farmers.db}
+SELECT
+  market_date,
+  customer_id,
+  SUM(quantity * cost_to_customer_per_qty) AS total_spent
+FROM farmers_market.customer_purchases
+WHERE customer_id = 3
+GROUP BY market_date
+ORDER BY market_date
+```
+
+How much did this customer spend at each vendor?
+
+```{sql fig-6.7, connection = farmers.db}
+SELECT
+  customer_id,
+  vendor_id,
+  SUM(quantity * cost_to_customer_per_qty) AS total_spent
+FROM farmers_market.customer_purchases
+WHERE customer_id = 3
+GROUP BY customer_id, vendor_id
+ORDER BY customer_id, vendor_id
+```
+
+How much money did each customer spend?
+
+```{sql fig-6.8, connection = farmers.db}
+SELECT
+  customer_id,
+  SUM(quantity * cost_to_customer_per_qty) AS total_spent
+FROM farmers_market.customer_purchases
+GROUP BY customer_id
+ORDER BY customer_id
+```
+
+We can also aggregate data on joined tables. Let's say that for the query that was grouped by `customer_id` and `vendor_id`, we want to bring in some customer details, such as first and last name, and the vendor name. We can first join the three tables, select columns from all the tables, and inspect the output before grouping, as shown in Figure 6.9.
+
+```{sql fig-6.9, connection = farmers.db}
+SELECT
+  c.customer_first_name,
+  c.customer_last_name,
+  cp.customer_id,
+  v.vendor_name,
+  cp.vendor_id,
+  cp.quantity * cp.cost_to_customer_per_qty AS price
+FROM farmers_market.customer AS c
+  LEFT JOIN farmers_market.customer_purchases AS cp
+  ON c.customer_id = cp.customer_id
+  LEFT JOIN farmers_market.vendor AS v
+  ON cp.vendor_id = v.vendor_id
+WHERE cp.customer_id = 3
+ORDER BY cp.customer_id, cp.vendor_id
+```
+
+To summarize at the level of one row per customer per vendor, we will have to group by a lot more fields, including all of the customer table fields and all of the vendor table fields. We want to group by all of the fields that don't include aggregate functions.
+
+```{sql fig-6.10, connection = farmers.db}
+SELECT
+  c.customer_first_name,
+  c.customer_last_name,
+  cp.customer_id,
+  v.vendor_name,
+  cp.vendor_id,
+  ROUND(SUM(quantity * cost_to_customer_per_qty), 2) AS total_spent
+FROM farmers_market.customer AS c
+  LEFT JOIN farmers_market.customer_purchases AS cp
+  ON c.customer_id = cp.customer_id
+  LEFT JOIN farmers_market.vendor AS v
+  ON cp.vendor_id = v.vendor_id
+WHERE cp.customer_id = 3
+GROUP BY 
+  c.customer_first_name,
+  c.customer_last_name,
+  cp.customer_id,
+  v.vendor_name,
+  cp.vendor_id
+ORDER BY cp.customer_id, cp.vendor_id
+```
+
+We can also keep the same level of aggregation and filter to a single vendor instead of a single customer, to get a list of customers per vendor instead of vendors per customer.
+
+```{sql fig-6.11, connection = farmers.db}
+SELECT
+  c.customer_first_name,
+  c.customer_last_name,
+  cp.customer_id,
+  v.vendor_name,
+  cp.vendor_id,
+  ROUND(SUM(quantity * cost_to_customer_per_qty), 2) AS total_spent
+FROM farmers_market.customer AS c
+  LEFT JOIN farmers_market.customer_purchases AS cp
+  ON c.customer_id = cp.customer_id
+  LEFT JOIN farmers_market.vendor AS v
+  ON cp.vendor_id = v.vendor_id
+WHERE cp.vendor_id = 8
+GROUP BY 
+  c.customer_first_name,
+  c.customer_last_name,
+  cp.customer_id,
+  v.vendor_name,
+  cp.vendor_id
+ORDER BY cp.customer_id, cp.vendor_id
+```
+
+# `MIN` and `MAX`
+
+To get the most and least expensive items per product category, we will use the `vendor_inventory` table, which has a field for the original price the vendors set for each item they bring to market on each market date. Let's first look at the all the variables in the `vendor_inventory` table:
+
+```{sql fig-6.12, connection = farmers.db}
+SELECT *
+FROM farmers_market.vendor_inventory
+ORDER BY original_price
+LIMIT 10
+```
+
+Now we use the `MIN()` and `MAX()` functions to get the least and most expensive items.
+
+```{sql fig-6.13, connection = farmers.db}
+SELECT
+  MIN(original_price) AS minimum_price,
+  MAX(original_price) AS maximum_price
+FROM farmers_market.vendor_inventory
+GROUP BY product_id, minimum_price, maximum_price
+ORDER BY original_price
+```
+
+To get the highest and lowest with each product category, we would `GROUP BY` `product_category_id`.
+
+```{sql fig-6.14, connection = farmers.db}
+SELECT
+  pc.product_category_name,
+  p.product_category_id,
+  MIN(vi.original_price) AS minimum_price,
+  MAX(vi.original_price) AS maximum_price
+FROM farmers_market.vendor_inventory AS vi
+  INNER JOIN farmers_market.product AS p
+  ON vi.product_id = p.product_id
+  INNER JOIN farmers_market.product_category AS pc
+  ON p.product_category_id = pc.product_category_id
+GROUP BY pc.product_category_name, p.product_category_id
+```
+
+# `COUNT` and `COUNT Distinct`
+
+To count how many products were for sale on each market date, or how many different products each vendor offered we use `COUNT` and `COUNT DISTINCT`.
+
+`COUNT` will count up the rows within a group when used with `GROUP BY`, and `COUNT DISTINCT` will count up the unique values present in the specified field within the group.
+
+Let's determine how many products are offered for sale each market date. We do this by counting up the rows in the `vendor_inventory` table, grouped by date.
+
+```{sql fig-6.15, connection = farmers.db}
+SELECT
+  market_date,
+  COUNT(product_id) AS product_count
+FROM farmers_market.vendor_inventory
+GROUP BY market_date
+ORDER BY market_date
+```
+
+To find out how many different products each vendor brought to market during a date range, we could use `COUNT DISTINCT` on the `product_id` field.
+
+```{sql fig-6.16, connection = farmers.db}
+SELECT
+  vendor_id,
+  COUNT(DISTINCT product_id) AS different_products_offered
+FROM farmers_market.vendor_inventory
+WHERE market_date BETWEEN "2019-04-02" AND "2019-06-16"
+GROUP BY vendor_id
+ORDER BY vendor_id
+```
+
+# Average
+
+In addition to the count, we can get the average original price of a product per vendor with `AVG()`
+
+```{sql fig-6.17, connection = farmers.db}
+SELECT
+  vendor_id,
+  COUNT(DISTINCT product_id) AS diferent_products_offered,
+  AVG(original_price) AS average_product_price
+FROM farmers_market.vendor_inventory
+WHERE market_date BETWEEN "2019-04-02" AND "2019-04-16"
+GROUP BY vendor_id
+ORDER BY vendor_id
+```
+
+Because each product only have one row of data the average is skewed. It makes more sense to multiply the quantity of each type of item times the price of that item, which is a calculation that would occur per row, then sum that up and divide by the total quantity of items.
+
+```{sql fig-6.18, connection = farmers.db}
+SELECT
+  vendor_id,
+  COUNT(DISTINCT product_id) AS different_products_offered,
+  SUM(quantity * original_price) AS value_of_inventory,
+  SUM(quantity) AS inventory_item_count,
+  ROUND(SUM(quantity * original_price) / SUM(quantity), 2) AS average_item_price
+FROM farmers_market.vendor_inventory
+WHERE market_date BETWEEN "2019-04-02" AND "2019-04-16"
+GROUP BY vendor_id
+ORDER BY vendor_id
+```
+
+# Filter with `HAVING`
+
+If you want to filter values after the aggregate functions are applied, you can add a `HAVING` clause to the query.
+
+```{sql fig-6.19, connection = farmers.db}
+SELECT
+  vendor_id,
+  COUNT(DISTINCT product_id) AS different_products_offered,
+  SUM(quantity * original_price) AS value_of_inventory,
+  SUM(quantity) AS inventory_item_count,
+  SUM(quantity * original_price) / SUM(quantity) AS average_item_price
+FROM farmers_market.vendor_inventory
+WHERE market_date BETWEEN "2019-04-02" AND "2019-04-16"
+GROUP BY vendor_id
+HAVING inventory_item_count >= 100
+ORDER BY vendor_id
+```
+
+# `CASE` Statements Inside Aggregate Functions
+
+Here we'll use a `CASE` statement to specify which type of item quantities to add together using each `SUM` aggregate function.
+
+```{sql fig-6.20, connection = farmers.db}
+SELECT
+  cp.market_date,
+  cp.vendor_id,
+  cp.customer_id,
+  cp.product_id,
+  cp.quantity,
+  p.product_name,
+  p.product_size,
+  p.product_qty_type
+FROM farmers_market.customer_purchases AS cp
+  INNER JOIN farmers_market.product AS p
+  ON cp.product_id = p.product_id
+```
+
+We want to create three columns: one that adds up the quantities of products that are sold by unit, another that adds up quantities of products sold by the pound, and a third for any products that may be entered in the future that are sold by other units. We'll put `CASE` statements inside the `SUM` functions to indicate which values to add up in each summary column.
+
+First, we review the `CASE` statements included before grouping or using aggregate functions.
+
+```{sql fig-6.21, connection = farmers.db}
+SELECT
+  cp.market_date,
+  cp.vendor_id,
+  cp.customer_id,
+  cp.product_id,
+  CASE WHEN product_qty_type = "unit" THEN quantity ELSE 0 END AS quantity_units,
+  CASE WHEN product_qty_type = "lbs" THEN quantity ELSE 0 END AS quantity_lbs,
+  CASE WHEN product_qty_type NOT IN ("unit", "lbs") THEN quantity ELSE 0 END AS quantity_other,
+  p.product_qty_type
+FROM farmers_market.customer_purchases cp
+  INNER JOIN farmers_market.product p
+  ON cp.product_id = p.product_id
+```
+
+Now we can add the `SUM` functions around each `CASE` statement to add up these values per market date per customer, as defined in the `GROUP BY` clause.
+
+```{sql fig-6.22, connection = farmers.db}
+SELECT
+  cp.market_date,
+  cp.customer_id,
+  SUM(CASE WHEN product_qty_type = "unit" THEN quantity ELSE 0 END) AS qty_units_purchased,
+  SUM(CASE WHEN product_qty_type = "lbs" THEN quantity ELSE 0 END) AS qty_lbs_purchased,
+  SUM(CASE WHEN product_qty_type NOT IN ("unit", "lbs") THEN quantity ELSE 0 END) AS qty_other_purchased
+FROM farmers_market.customer_purchases AS cp
+  INNER JOIN farmers_market.product AS p
+  ON cp.product_id = p.product_id
+GROUP BY market_date, customer_id
+ORDER BY market_date, customer_id
+```
+
+# Exercises Using the Included Database
+
+1.  Write a query that determines how many times each vendor has rented a booth at the farmer's market. In other words, count the vendor booth assignments per `vendor_id`.
+
+    ```{sql ex1, connection = farmers.db}
+    SELECT
+      vba.vendor_id,
+      v.vendor_name,
+      COUNT(vba.vendor_id) AS tot_booth_assignments
+    FROM farmers_market.vendor_booth_assignments AS vba
+      LEFT JOIN farmers_market.vendor AS v
+      ON vba.vendor_id = v.vendor_id
+    GROUP BY vba.vendor_id
+    ```
+
+2.  In Chapter 5 Exercise 3, we asked "when is each type of fresh fruit or vegetable in season, locally? Write a query that displays the product category name, product name, earliest date available, and latest date available for every product in the "Fresh Fruits & Vegetables" product category.
+
+    ```{sql ex2, connection = farmers.db}
+    SELECT 
+      p.product_name,
+      pc.product_category_name,
+      MIN(market_date) AS earliest_available,
+      MAX(market_date) AS latest_available
+    FROM farmers_market.vendor_inventory AS vi
+      LEFT JOIN farmers_market.product AS p
+      ON vi.product_id = p.product_id
+      LEFT JOIN farmers_market.product_category AS pc
+      ON p.product_category_id = pc.product_category_id
+    WHERE pc.product_category_name = "Fresh Fruits & Vegetables"
+    GROUP BY p.product_name
+    ```
+
+3.  The Farmer's Market Customer Appreciation Committee wants to give a bumper sticker to everyone who has ever spent more than \$50 at the market. Write a query that generates a list of customers for them to give stickers to, sorted by last name, then first name.
+
+    ```{sql ex3, connection = farmers.db}
+    SELECT 
+      c.customer_id,
+      c.customer_first_name,
+      c.customer_last_name,
+      c.customer_zip,
+      SUM(quantity * cost_to_customer_per_qty) AS tot_spent
+    FROM farmers_market.customer AS c
+      LEFT JOIN farmers_market.customer_purchases AS cp
+      ON c.customer_id = cp.customer_id
+    GROUP BY c.customer_id
+    HAVING tot_spent > 3000
+    ORDER BY c.customer_last_name, c.customer_last_name
+    ```
