@@ -1,0 +1,321 @@
+---
+title: "Chapter 4: CASE Statements"
+output: html_notebook
+---
+
+# Setup the Database
+
+```{r setup}
+library(pacman)
+p_load(dplyr, DBI)
+
+# Create a database table in memory
+farmers.db <- 
+  dbConnect(RMariaDB::MariaDB(), 
+            group = "/Users/nickjenkins/Documents/Workshops & Conferences/SQL for Data Scientists/SQL for Data Scientists support files/FarmersMarketDatabase.sql",
+            username = "root",
+            password = "Hockeydude25",
+            host = "localhost",
+            port = 3306)
+```
+
+# `CASE` Statements
+
+`CASE` statements are used when you want create new columns based on certain criteria.
+
+# `CASE` Statement Syntax
+
+`CASE` statements are equivalent to `case_when()` in `dplyr`. They use if-else logic. Here is the syntax:
+
+`CASE`
+
+`WHEN [first conditional statement]`
+
+`THEN [value or calculation]`
+
+`WHEN [second conditional statement]`
+
+`THEN [value or calculation]`
+
+`ELSE [value or calculation]`
+
+`END`
+
+This statement indicates that we want a column to contain different values under different conditions:
+
+```{sql eval = FALSE}
+CASE
+  WHEN weather_forecast = "rain"
+  THEN "take umbrella"
+  ELSE "leave umbrella at home"
+END
+```
+
+the `WHEN`s are evaluated in order, from top to bottom, and the first time a condition evaluates to TRUE, the corresponding `THEN` part of the statement is executed, and no other `WHEN` conditions are evaluated.
+
+The `ELSE` part of the statement is optional, and that value or calculation result is returned if none of the conditional statements above it evaluate to TRUE. If the `ELSE` statement is not included and none of the `WHEN` conditions evaluate to TRUE, the resulting value will be NULL.
+
+Let's say that we want to know which vendors primarily sell fresh produce and which don't. The vendors we want to label as "Fresh Produce" have the word "Fresh" in the `vendor_type` column.
+
+```{sql fig-4.2, connection = farmers.db}
+SELECT
+  vendor_id,
+  vendor_name,
+  vendor_type,
+  CASE
+  WHEN LOWER(vendor_type) LIKE "%fresh%"
+  THEN "Fresh Produce"
+  ELSE "Other"
+  END AS vendor_type_condensed
+FROM farmers_market.vendor
+```
+
+# Creating Binary Flags Using `CASE`
+
+A binary flag field contains only 1s or 0s (dummy variable). The farmers markets usually occur on Wednesdays or Saturdays.
+
+```{sql connection = farmers.db}
+SELECT  
+  market_date,
+  market_day
+FROM farmers_market.market_date_info
+LIMIT 5
+```
+
+We can generate a binary flag field the indicates whether it's a weekday or weekend market with a `CASE` statement.
+
+```{sql fig-4.4, connection = farmers.db}
+SELECT
+  market_date,
+  CASE
+  WHEN market_day = "Saturday" OR market_day = "Sunday"
+  THEN 1
+  ELSE 0
+  END AS weekend_flag
+FROM farmers_market.market_date_info
+LIMIT 5
+```
+
+# Grouping or Binning Continuous Values Using `CASE`
+
+If we wanted to all rows and only indicate whether the cost was over \$50, we would write a query like this:
+
+```{sql fig-4.5, connection = farmers.db}
+SELECT
+  market_date,
+  customer_id,
+  vendor_id,
+  ROUND(quantity * cost_to_customer_per_qty, 2) AS price,
+  CASE
+  WHEN quantity * cost_to_customer_per_qty > 50
+  THEN 1
+  ELSE 0
+  END AS price_over_50
+FROM farmers_market.customer_purchases
+LIMIT 40
+```
+
+We can also use `CASE` to "bin" a continuous value, like price. Let's say we wanted to put the line-item customer purchases into bins of under \$5.00, \$5.00-\$9.99, \$10.00-\$19.00, of \$20.00 and over.
+
+```{sql fig-4.6, connection = farmers.db}
+SELECT
+  
+  market_date,
+  
+  customer_id,
+  
+  vendor_id,
+  
+  ROUND(quantity * cost_to_customer_per_qty, 2) AS price,
+  
+  CASE
+  
+  WHEN quantity * cost_to_customer_per_qty < 5.00
+  
+  THEN "Under $5"
+  
+  WHEN quantity * cost_to_customer_per_qty < 10.00
+  
+  THEN "$5-$9.99"
+  
+  WHEN quantity * cost_to_customer_per_qty < 20.00
+  
+  THEN "$10-$19.99"
+  
+  WHEN quantity * cost_to_customer_per_qty >= 20.00
+  
+  THEN "$20 and Up"
+  
+  END AS price_bin
+  
+FROM farmers_market.customer_purchases
+
+LIMIT 10
+```
+
+We can also output numeric data:
+
+```{sql fig-4.7, connection = farmers.db}
+SELECT
+  
+  market_date,
+  
+  customer_id,
+  
+  vendor_id,
+  
+  ROUND(quantity * cost_to_customer_per_qty, 2) AS price,
+  
+  CASE
+  
+  WHEN quantity * cost_to_customer_per_qty < 5.00
+  
+  THEN 0
+  
+  WHEN quantity * cost_to_customer_per_qty < 10.00
+  
+  THEN 5
+  
+  WHEN quantity * cost_to_customer_per_qty < 20.00
+  
+  THEN 10
+  
+  WHEN quantity * cost_to_customer_per_qty >= 20.00
+  
+  THEN 20
+  
+  END AS price_bin
+  
+FROM farmers_market.customer_purchases
+
+LIMIT 10
+```
+
+# Categorical Encoding Using `CASE`
+
+Often it is necessary to "encode" categorical string variables as numeric variables, in order for a mathematical algorithm to be able to use them as input. When doing this it can be a good idea to use rank ordered values.
+
+```{sql fig-4.8, connection = farmers.db}
+SELECT
+  booth_number,
+  booth_price_level,
+  CASE
+  WHEN booth_price_level = "A" THEN 1
+  WHEN booth_price_level = "B" THEN 2
+  WHEN booth_price_level = "C" THEN 3
+  END AS booth_price_level_numeric
+FROM farmers_market.booth
+LIMIT 5
+```
+
+If there isn't any rank order, then we can use "one-hot encoding." This means that we create a new column representing each category, assigning it a binary value of 1 if a row falls into that category, and a 0 otherwise.
+
+```{sql fig-4.9, connection = farmers.db}
+SELECT
+
+  vendor_id,
+  
+  vendor_name,
+  
+  vendor_type,
+  
+  CASE WHEN vendor_type = "Arts & Jewelry"
+  
+  THEN 1
+  
+  ELSE 0
+  
+  END AS vendor_type_arts_jewelry,
+  
+  CASE WHEN vendor_type = "Eggs & Meats"
+  
+  THEN 1
+  
+  ELSE 0
+  
+  END AS vendor_type_eggs_meats,
+  
+  CASE WHEN vendor_type = "Fresh Focused"
+  
+  THEN 1
+  
+  ELSE 0
+  
+  END AS vendor_type_fresh_focused,
+  
+  CASE WHEN vendor_type = "Fresh Variety: Veggies & More"
+  
+  THEN 1
+  
+  ELSE 0
+  
+  END AS vendor_type_fresh_variety,
+  
+  CASE WHEN vendor_type = "Prepared Foods"
+  
+  THEN 1
+  
+  ELSE 0
+  
+  END AS vendor_type_prepared
+  
+FROM farmers_market.vendor
+```
+
+# Exercises
+
+Look back at Figure 2.1 in Chapter 2 for sample data and column names for the `product` table referenced in these exercises.
+
+1.  Products can be sold by the individual unit or by bulk measures like lbs. or oz. Write a query that outputs the `product_id` and `product_name` columns from the `product` table, and add a column called `prod_qty_type_condensed` that displays the word "unit" if the `product_qty_type` is "unit" and otherwise displays the word "bulk."
+
+    ```{sql ex1, connection = farmers.db}
+    SELECT 
+      
+      product_id,
+      
+      product_name,
+      
+      CASE WHEN product_qty_type = "unit"
+      
+      THEN "unit"
+      
+      ELSE "bulk"
+      
+      END AS product_qty_type_condensed
+
+    FROM farmers_market.product
+    ```
+
+2.  We want to flag all of the different types of pepper products that are sold at the market. Add a column to the previous query called `pepper_flag` that outputs a 1 if the `product_name` contains the word "pepper" (regardless of capitalization), and otherwise outputs 0.
+
+    ```{sql ex2, connection = farmers.db}
+    SELECT 
+      
+      product_id,
+      
+      product_name,
+      
+      CASE WHEN product_qty_type = "unit"
+      
+      THEN "unit"
+      
+      ELSE "bulk"
+      
+      END AS product_qty_type_condensed,
+      
+      CASE 
+      
+      WHEN product_name LIKE "%pepper%"
+      
+      THEN 1
+      
+      ELSE 0
+      
+      END AS pepper_flag
+
+    FROM farmers_market.product
+    ```
+
+3.  Can you think of a situation when a pepper product might not get flagged as a pepper product using the code from the previous exercise?
+
+    If pepper was spelled wrong, if the product name had a missing value, or if the name didn't contain "pepper."

@@ -1,0 +1,216 @@
+---
+title: "Chapter 5: SQL JOINs"
+output: html_notebook
+---
+
+# Setup the Database
+
+```{r setup}
+library(pacman)
+p_load(dplyr, DBI)
+
+# Create a database table in memory
+farmers.db <- 
+  dbConnect(RMariaDB::MariaDB(), 
+            group = "/Users/nickjenkins/Documents/Workshops & Conferences/SQL for Data Scientists/SQL for Data Scientists support files/FarmersMarketDatabase.sql",
+            username = "root",
+            password = "Hockeydude25",
+            host = "localhost",
+            port = 3306)
+```
+
+# SQL `JOIN`s
+
+SQL JOINs are used when you need data across multiple related tables.
+
+# Database Relationships and SQL `JOIN`s
+
+Let's say we wanted to list each product name along with its product category name. Since onle the ID of the product category exists in the product table, and the product category's name is in the `product_category` table, we have to combine the data in the `product` and `product_category` tables together in order to generate this list. Each product can only belong to one category, but each category can contain many products, so this is a one-to-many relationship. The primary key in the `product_category` table is the `product_category_id`. There is also a `product_category_id` in each row of the `product` table that serves as a foreign key, identifying which category each product belongs to.
+
+## `LEFT JOIN`
+
+The `LEFT JOIN` pulls all records from the table on the "left side" of the `JOIN`, and only the matching records from the table on the "right side" of the join.
+
+![](https://d33wubrfki0l68.cloudfront.net/9c12ca9e12ed26a7c5d2aa08e36d2ac4fb593f1e/79980/diagrams/join-outer.png){width="65%"}
+
+The syntax for creating a `LEFT JOIN` is:\
+`SELECT [columns to return]`
+
+`FROM [left table]`
+
+`[JOIN TYPE][right table]`
+
+`ON [left table].[field in left table to match]=[right.table].[field in right table to match]`
+
+To pull a list of all products with each product's category name listed, we make the `product` table the "left" table in the query by listing it first after `FROM`, and the `product_category` table the "right" side by listing it after the `LEFT JOIN`, and we'll match up the records using the `product_category_id` fields.
+
+```{sql connection = farmers.db}
+SHOW databases
+```
+
+```{sql connection = farmers.db}
+USE farmers_market
+```
+
+```{sql fig-5.5, connection = farmers.db}
+SELECT * FROM farmers_market.product
+  LEFT JOIN product_category
+  ON product.product_category_id = product_category.product_category_id
+```
+
+This query asks SQL to select all columns and rows from the product table, and all columns from the `product_category` table for rows where the `product_category`'s `product_category_id` matches a product's `product_category_id`.
+
+If we want to return specific columns from the merged dataset, we have to specify which table each column is from, since it's possible to have identically named columns in different tables.
+
+```{sql fig-5.6, connection = farmers.db}
+SELECT
+  product.product_id,
+  product.product_name,
+  product.product_category_id AS product_prod_cat_id,
+  product_category.product_category_id AS category_prod_cat_id,
+  product_category.product_category_name
+FROM product
+  LEFT JOIN product_category
+  ON product.product_category_id = product_category.product_category_id
+```
+
+You can create table aliases like this:
+
+```{sql fig-5.7, connection = farmers.db}
+SELECT 
+  p.product_id,
+  p.product_name,
+  pc.product_category_id,
+  pc.product_category_name
+FROM farmers_market.product AS p
+  LEFT JOIN product_category AS pc
+  ON p.product_category_id = pc.product_category_id
+ORDER BY pc.product_category_name, p.product_name
+```
+
+Sometimes `JOIN`s can produce NULL values.
+
+```{sql fig-5.12, connection = farmers.db}
+SELECT *
+FROM farmers_market.customer AS c
+LEFT JOIN customer_purchases AS cp
+  ON c.customer_id = cp.customer_id
+```
+
+This happened because there are some customers without any purchases. We can use a `WHERE` clause to filter the list to only customers with no purchases:
+
+```{sql fig-5.13, connection = farmers.db}
+SELECT c.*
+FROM customer AS c
+LEFT JOIN customer_purchases AS cp
+  ON c.customer_id = cp.customer_id
+WHERE cp.customer_id IS NULL
+```
+
+The `c.*` only selects columns from the customer table.
+
+## `RIGHT JOIN`
+
+In a `RIGHT JOIN`, all of the rows from the "right table" are returned, along with only the matching rows from the "left table," using the fields specified in the `ON` part of the query. An example of when we would use a `RIGHT JOIN` would be if we wanted to list all product categories and the products in each, and you don't care about products that were not put into a category, but you did care about categories that didn't contain any products.
+
+We can use a `RIGHT JOIN` to list all purchases and the customers associated with them by pulling all records from the `customer_purchases` table, and only customers from the customer table with a purchase.
+
+```{sql fig-5.14, connection = farmers.db}
+SELECT *
+FROM customer AS c
+RIGHT JOIN customer_purchases AS cp
+  ON c.customer_id = cp.customer_id
+```
+
+## `INNER JOIN`
+
+An `INNER JOIN` only returns records that have matches in both tables.
+
+![Inner Join](https://d33wubrfki0l68.cloudfront.net/3abea0b730526c3f053a3838953c35a0ccbe8980/7f29b/diagrams/join-inner.png)
+
+# A Common Pitfall when Filtering Joined Data
+
+If you filter for values on the right side when doing a left join, the result will be an `INNER JOIN`.
+
+Let's say we want to write a query that returns a list of all customers who did *not* make a purchase at the March 2, 2019, farmer's market. We will use a `LEFT JOIN`, since we want to include the customers who have never made a purchase at any farmer's market, so wouldn't have any records in the `customer_purchases` table:
+
+```{sql fig-5.15, connection = farmers.db}
+SELECT c.*, cp.market_date
+FROM customer AS c
+LEFT JOIN customer_purchases AS cp
+  ON c.customer_id = cp.customer_id
+WHERE cp.market_date <> "2019-04-02"
+```
+
+This query is problematic because the result is missing customers who have never made a purchase. This happened because we filtered the `market_date` in the `customer_purchases` table, which is on the "right side" of the `JOIN`.
+
+One solution that will allow us to filter the results returned using a field in the table on the right side of the join while still returning records that only exist in the left side table is to write the `WHERE` clause to allow `NULL` values in the field:
+
+```{sql fig-5.16, connection = farmers.db}
+SELECT c.*, cp.market_date
+FROM customer AS c
+LEFT JOIN customer_purchases AS cp
+  ON c.customer_id = cp.customer_id
+WHERE (cp.market_date <> "2019-04-02" OR cp.market_date IS NULL)
+```
+
+The second problem is that the output contains one row per customer per item purchased, because the `customer_purchases` table has a record for each item purchased, when we just wanted a list of customers. We can solve this by removing the `market_date` field from the `customer_purchases` "side" of the relationship, so the purchase dates aren't displayed, then using the `DISTINCT` keyword, which removes duplicates records in the output.
+
+```{sql fig-5.17, connection = farmers.db}
+SELECT DISTINCT c.*
+FROM customer AS c
+LEFT JOIN customer_purchases AS cp
+  ON c.customer_id = cp.customer_id
+WHERE (cp.market_date <> "2019-04-02" OR cp.market_date IS NULL)
+```
+
+# `JOIN`s with More than Two Tables
+
+Let's say we want details about all farmer's market booths, as well as every vendor booth assignment for every market date. Perhaps we're building an interactive report that lets us filter to a booth, a vendor, or a date, to see the resulting list of booth assignments with additional both and vendor details. To do this we need to join three tables.
+
+We can `LEFT JOIN` the `vendor_booth_assignments` to `booth`, therefore including all of the booths, and `LEFT JOIN` `vendor` to `vendor_booth_assignments` in the results.
+
+```{sql fig-5.19, connection = farmers.db}
+SELECT
+  b.booth_number,
+  b.booth_type,
+  vba.market_date,
+  v.vendor_id,
+  v.vendor_name,
+  v.vendor_type
+FROM booth AS b
+  LEFT JOIN vendor_booth_assignments AS vba ON b.booth_number = vba.booth_number
+  LEFT JOIN vendor AS v ON v.vendor_id = vba.vendor_id
+ORDER BY b.booth_number, vba.market_date
+```
+
+# Exercises Using the Included Database
+
+1.  Write a query that `INNER JOIN`s the `vendor` table to the `vendor_booth_assignments` table on the `vendor_id` field they both have in common, and sorts the results by `vendor_name`, then `market_date`.
+
+    ```{sql ex1, connection = farmers.db}
+    SELECT * 
+    FROM farmers_market.vendor AS v
+      INNER JOIN vendor_booth_assignments AS vba ON v.vendor_id = vba.vendor_id
+    ORDER BY vendor_name, market_date
+    ```
+
+2.  Is it possible to write a query that produces an output identical to the output of the following query, but using a `LEFT JOIN` instead of a `RIGHT JOIN`?
+
+    ```{sql p2, connection = farmers.db, eval = FALSE}
+    SELECT *
+    FROM customer AS c
+    RIGHT JOIN customer_purchases AS cp
+      ON c.customer_id = cp.customer_id
+    ```
+
+    ```{sql ex2, connection = farmers.db}
+    SELECT *
+    FROM customer_purchases AS cp
+    LEFT JOIN customer AS c
+      ON cp.customer_id = c.customer_id
+    ```
+
+3.  At the beginning of this chapter, the analytical question "When is each type of fresh fruit or vegetable in season locally?" was asked, and it was explained that the answer requires data from the `product_category` table, the `product` table, and the `vendor_inventory` table. What type of `JOIN`s do you expect would be needed to combine these three tables in order to be able to answer this question?
+
+    I would expect this to be accomplished with two `LEFT JOIN`s.
