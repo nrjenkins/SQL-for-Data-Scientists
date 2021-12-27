@@ -1,0 +1,233 @@
+---
+title: "Chapter 2: The SELECT Statement"
+output: html_notebook
+---
+
+# The `SELECT` Statement
+
+A SELECT statement is SQL code that retrieves data from the database.
+
+# The Fundamental Syntax Structure of a `SELECT` Query
+
+SQL SELECT queries follow this basic syntax, through most of the clauses are optional:
+
+-   SELECT \[columns to return\]
+
+-   FROM \[schema.table\]
+
+-   WHERE \[conditional filter statements\]
+
+-   GROUP BY \[columns to group on\]
+
+-   HAVING \[conditional filter statements that are run after grouping\]
+
+-   ORDER BY \[columns to sort on\]
+
+# Selecting Columns and Limiting the Number of Rows Returned
+
+```{r setup}
+library(pacman)
+p_load(dplyr, dbplyr, DBI)
+
+# Create a database table in memory
+farmers.db <- 
+  dbConnect(RMariaDB::MariaDB(), 
+            group = "/Users/nickjenkins/Documents/Workshops & Conferences/SQL for Data Scientists/SQL for Data Scientists support files/FarmersMarketDatabase.sql",
+            username = "root",
+            password = "Hockeydude25",
+            host = "localhost",
+            port = 3306)
+```
+
+The simplest SELECT statement is
+
+-   `SELECT * FROM [schema.table]`
+
+where \[schema.table\] is the name of the database schema and table you want to retrieve data from. For example, `SELECT * FROM farmers_market.product` can be read as "Select everything from the product table in the `farmers_market` schema." The asterisk really represents "all columns" so technically it's "Select all columns from the product table in the `farmers_market` schema," but since there are no filters in the query (no `WHERE` clause), it will also return all rows.
+
+The `LIMIT` clause sets the maximum number of rows that are returned. For example:
+
+```{sql fig-2.1, connection = farmers.db}
+SELECT * 
+FROM farmers_market.product 
+LIMIT 5
+```
+
+To specify which columns you want returned, list the column names immediately after `SELECT` separated by commas, instead of using the asterisk.
+
+```{sql fig-2.2, connection = farmers.db}
+SELECT product_id, product_name
+FROM farmers_market.product
+LIMIT 5
+```
+
+```{sql fig-2.3, connection = farmers.db}
+SELECT market_date, vendor_id, booth_number
+FROM farmers_market.vendor_booth_assignments
+LIMIT 5
+```
+
+# The `ORDER BY` Clause: Sorting Results
+
+The `ORDER BY` clause is used to sort the output rows.
+
+```{sql fig-2.4, connection = farmers.db}
+SELECT product_id, product_name
+FROM farmers_market.product
+ORDER BY product_name
+LIMIT 5
+```
+
+Now in descending order by `product_id`:
+
+```{sql fig-2.5, connection = farmers.db}
+SELECT product_id, product_name
+FROM farmers_market.product
+ORDER BY product_id DESC
+LIMIT 5
+```
+
+Now we can sort the output of the query of markets dates:
+
+```{sql fig-2.6, connection = farmers.db}
+SELECT market_date, vendor_id, booth_number
+FROM farmers_market.vendor_booth_assignments
+ORDER BY market_date, vendor_id
+LIMIT 5
+```
+
+# Introduction to Simple Inline Calculations
+
+Say we wanted to do a calculation using the different columns in each row. In the `customer_purchases` table we have a `quantity` column and a `cost_to_customer_purchases` column, so we can multiply those to get a price. Here is the raw data:
+
+```{sql fig-2.7, connection = farmers.db}
+SELECT
+  market_date,
+  customer_id,
+  vendor_id,
+  quantity,
+  cost_to_customer_per_qty
+FROM farmers_market.customer_purchases
+LIMIT 10
+```
+
+Now the calculation:
+
+```{sql fig-2.8, connection = farmers.db}
+SELECT
+  market_date,
+  customer_id,
+  vendor_id,
+  quantity,
+  cost_to_customer_per_qty,
+  quantity * cost_to_customer_per_qty
+FROM farmers_market.customer_purchases
+LIMIT 10
+```
+
+To give the new column a meaningful name, we can create an *alias* by adding the keyword `AS` after the calculation and then specifying the new name.
+
+```{sql fig-2.9, connection = farmers.db}
+SELECT
+  market_date,
+  customer_id,
+  vendor_id,
+  quantity,
+  cost_to_customer_per_qty,
+  quantity * cost_to_customer_per_qty AS price
+FROM farmers_market.customer_purchases
+LIMIT 10
+```
+
+## More Inline Calculation Examples: Rounding
+
+A SQL function is a piece of code that takes inputs that you give (which are called parameters), performs some operation on those inputs, and returns a value:
+
+`FUNCTION_NAME([parameter 1], [parameter 2], …, [parameter n])`
+
+Here is an example with the `ROUND()` function.
+
+```{sql fig-2.10, connection = farmers.db}
+SELECT
+  market_date,
+  customer_id,
+  vendor_id,
+  ROUND(quantity * cost_to_customer_per_qty, 2) AS price
+FROM farmers_market.customer_purchases
+LIMIT 10
+```
+
+## More Inline Calculation Examples: Concatenating Strings
+
+We can also use functions to modify string values. Let's say we wanted to merge each customer's name into a single column that contains the first name, then a space, and then a last name. We accomplish this using the `CONCAT()` function.
+
+```{sql fig-2.12, connection = farmers.db}
+SELECT 
+  customer_id,
+  CONCAT(customer_first_name, " ", customer_last_name) AS customer_name
+FROM farmers_market.customer
+LIMIT 5
+```
+
+And we can order the output:
+
+```{sql fig-2.13, connection = farmers.db}
+SELECT 
+  customer_id,
+  CONCAT(customer_first_name, " ", customer_last_name) AS customer_name
+FROM farmers_market.customer
+ORDER BY customer_last_name, customer_first_name
+LIMIT 5
+```
+
+We can also nest functions. SQL executes the functions from the "inside" to the "outside." Let's capitalize the customer's names.
+
+```{sql fig-2.14, connection = farmers.db}
+SELECT 
+  customer_id,
+  UPPER(CONCAT(customer_last_name, ", ", customer_first_name)) AS customer_name
+FROM farmers_market.customer
+ORDER BY customer_last_name, customer_first_name
+LIMIT 5
+```
+
+# Evaluating Query Output
+
+A query editor can be used to review the results of a query. As an example, we'll use the "rounded price" query from earlier.
+
+```{sql fig-2.16, connection = farmers.db}
+SELECT
+  market_date,
+  customer_id,
+  vendor_id,
+  ROUND(quantity * cost_to_customer_per_qty, 2) AS price
+FROM farmers_market.customer_purchases
+```
+
+# Exercises Using the Included Database
+
+The following exercises refer to the `customer` table. The columns contained in the `customer` table, and some example rows with data values, are shown in Figure 2.11.
+
+1.  Write a query that returns everything in the `customer` table
+
+    ```{sql ex1, connection = farmers.db}
+    SELECT * FROM farmers_market.customer
+    ```
+
+2.  Write a query that displays all of the columns and 10 rows from the `customer` table, sorted by `customer_last_name`, then `customer_first_name`.
+
+    ```{sql ex2, connection = farmers.db}
+    SELECT * FROM farmers_market.customer
+    ORDER BY customer_last_name, customer_first_name
+    LIMIT 10
+    ```
+
+3.  Write a query that lists all customer IDs and first names in the `customer` table, sorted by `first_name`.
+
+    ```{sql ex3, connection = farmers.db}
+    SELECT 
+      customer_id, 
+      customer_first_name
+    FROM farmers_market.customer
+    ORDER BY customer_first_name
+    ```

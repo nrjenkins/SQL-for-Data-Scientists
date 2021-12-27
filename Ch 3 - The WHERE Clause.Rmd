@@ -1,0 +1,365 @@
+---
+title: "Chapter 3: The WHERE Clause"
+output: html_notebook
+---
+
+# Setup the Database
+
+```{r setup}
+library(pacman)
+p_load(dplyr, DBI)
+
+# Create a database table in memory
+farmers.db <- 
+  dbConnect(RMariaDB::MariaDB(), 
+            group = "/Users/nickjenkins/Documents/Workshops & Conferences/SQL for Data Scientists/SQL for Data Scientists support files/FarmersMarketDatabase.sql",
+            username = "root",
+            password = "Hockeydude25",
+            host = "localhost",
+            port = 3306)
+```
+
+# The `WHERE` Clause
+
+The `WHERE` clause is the part of the `SELECT` statement in which you list conditions that are used to determine which rows in the table should be included in the results set. `WHERE` is used for filtering.
+
+# Filtering `SELECT` Statement Results
+
+The `WHERE` clause goes after the `FROM` statement and before any `GROUP BY`, `ORDER BY`, or `LIMIT` statements in the `SELECT` query:
+
+`SELECT` \[columns to return\]
+
+`FROM` \[table\]
+
+`WHERE` \[conditional filter statements\]
+
+`ORDER BY` \[columns to sort on\]
+
+For example, to get a list of product IDs and product names that are in product category 1, you could use a conditional statement in the `WHERE` clause to select only rows from the `product` table in which the `product_category_id` is 1, as demonstrated by the following query and the output in Figure 3.1.
+
+```{sql fig-3.1, connection = farmers.db}
+SELECT 
+  product_id,
+  product_name,
+  product_category_id
+FROM farmers_market.product
+WHERE
+  product_category_id = 1
+LIMIT 5
+```
+
+Lets say that we wanted to print a report of everything a particular customer has ever purchased at the farmer's market, sorted by market date, vendor ID, and product ID.
+
+```{sql fig-3.2, connection = farmers.db}
+SELECT
+  market_date,
+  customer_id,
+  vendor_id,
+  product_id,
+  quantity,
+  quantity * cost_to_customer_per_qty AS price
+FROM farmers_market.customer_purchases
+WHERE customer_id = 4
+ORDER BY market_date, vendor_id, product_id
+LIMIT 5
+```
+
+# Filtering on Multiple Conditions
+
+You can use boolean operators, such as `AND`, `OR`, or `AND NOT`. `OR` means that the row will be returned if *any* of the clauses are TRUE.
+
+| Condition 1: | Boolean Operator | Condition 2: | Row Returned |
+|--------------|------------------|--------------|--------------|
+| TRUE         | `OR`             | FALSE        | *TRUE*       |
+| TRUE         | `OR`             | TRUE         | *TRUE*       |
+| FALSE        | `OR`             | FALSE        | *FALSE*      |
+| TRUE         | `AND`            | FALSE        | *FALSE*      |
+| TRUE         | `AND`            | TRUE         | *TRUE*       |
+| TRUE         | `AND NOT`        | FALSE        | *TRUE*       |
+| FALSE        | `AND NOT`        | TRUE         | *FALSE*      |
+| FALSE        | `AND NOT`        | FALSE        | *FALSE*      |
+| FALSE        | `OR NOT`         | FALSE        | *TRUE*       |
+
+Changing the `WHERE` condition to return customer IDs 3 and 4 we get:
+
+```{sql fig-3.3, connection = farmers.db}
+SELECT
+  market_date,
+  customer_id,
+  vendor_id,
+  product_id,
+  quantity,
+  quantity * cost_to_customer_per_qty AS price
+FROM farmers_market.customer_purchases
+WHERE customer_id = 3 
+  OR customer_id = 4
+ORDER BY market_date, vendor_id, product_id
+```
+
+With an `AND` condition instead. We can read this as "return each row where the customer ID is 3 and the customer ID is 4."
+
+```{sql fig-3.4, connection = farmers.db}
+SELECT
+  market_date,
+  customer_id,
+  vendor_id,
+  product_id,
+  quantity,
+  quantity * cost_to_customer_per_qty AS price
+FROM farmers_market.customer_purchases
+WHERE customer_id = 3 
+  AND customer_id = 4
+ORDER BY market_date, vendor_id, product_id
+```
+
+You could use `AND` when referring to only a single column is when you want to return rows with a range of values. For example, "Give me all of the rows with a customer ID greater than 3 and less than or equal to 5," would be written as `WHERE customer_id > 3 AND customer_id <= 5`.
+
+```{sql fig-3.4, connection = farmers.db}
+SELECT
+  market_date,
+  customer_id,
+  vendor_id,
+  product_id,
+  quantity,
+  quantity * cost_to_customer_per_qty AS price
+FROM farmers_market.customer_purchases
+WHERE customer_id > 3 
+  AND customer_id <= 5
+ORDER BY market_date, vendor_id, product_id
+```
+
+You can combine multiple `AND`, `OR`, and `NOT` conditions to control which order they get evaluated by using parentheses.
+
+```{sql fig-3.5, connection = farmers.db}
+SELECT
+  product_id,
+  product_name
+FROM farmers_market.product
+WHERE product_id = 10 
+  OR (product_id > 3)
+  AND product_id < 8
+```
+
+In this query, when the product ID is 10, it is evaluated as
+
+`TRUE OR (TRUE AND FALSE) = TRUE OR (FALSE) = TRUE`
+
+```{sql fig-3.6, connection = farmers.db}
+SELECT
+  product_id,
+  product_name
+FROM farmers_market.product
+WHERE 
+  (product_id = 10 
+  OR product_id > 3)
+  AND product_id < 8
+```
+
+In this second query, the `WHERE` clause is evaluated as:
+
+`(TRUE OR FALSE) AND FALSE = (TRUE) AND FALSE = FALSE`
+
+Since the `OR` statement evaluates to TRUE if *any* of the conditions are TRUE, but the `AND` statement only evaluates to TRUE if *all* of the conditions are true, the row with a `product_id` value of 10 is only returned by the first query.
+
+# Multi-Column Conditional Filtering
+
+`WHERE` clauses can also impose conditions using values in multiple columns. For example, if we wanted to know the details of purchases made by customer 4 at vendor 7, we could use the following query:
+
+```{sql fig-3.7, connection = farmers.db}
+SELECT 
+  market_date,
+  customer_id,
+  vendor_id,
+  quantity * cost_to_customer_per_qty AS price
+FROM farmers_market.customer_purchases
+WHERE
+  customer_id = 4
+  AND vendor_id = 7
+```
+
+Now let's try a `WHERE` clause that uses an `OR` condition to apply comparisons across multiple fields. This query will return anyone in the customer table with the first name of "Carlos" or the last name of "Diaz:"
+
+```{sql fig-3.8, connection = farmers.db}
+SELECT
+  customer_id,
+  customer_first_name,
+  customer_last_name
+FROM farmers_market.customer
+WHERE
+  customer_first_name = "Carlos"
+  OR customer_last_name = "Diaz"
+```
+
+If you wanted to find out what booth(s) vendor 2 was assigned to on or before March 9, 2019, you could use this query:
+
+```{sql fig-3.9, connection = farmers.db}
+SELECT *
+FROM farmers_market.vendor_booth_assignments
+WHERE
+  vendor_id = 9
+  AND market_date <= "2019-03-09"
+ORDER BY market_date
+```
+
+*I think the data I'm using is slightly different.*
+
+# More Ways to Filter
+
+Other ways to filter is the check if a field is NULL, comparing a string against another partial string value using a wildcard comparison, determining if a field value is found within a list of values, and determining if a field value lies between two other values, among others.
+
+## `BETWEEN`
+
+We can use the `BETWEEN` keyword to see if a value is within a specified range of values. Lets query to find the booth assignments for vendor 7 for any market date that occurred between March 2, 2019 (April 2), and March 16, 2019 (April 16), including either of those two dates.
+
+```{sql fig-3.10, connection = farmers.db}
+SELECT *
+FROM farmers_market.vendor_booth_assignments
+WHERE
+  vendor_id = 7
+  AND market_date BETWEEN "2019-04-02" and "2019-04-16"
+ORDER BY market_date
+```
+
+## `IN`
+
+To return a list of customers with selected last names, we could use a long list of `OR` comparisons, as shown in the first query or use the `IN` keyword.
+
+```{sql fig-3.11a, connection = farmers.db}
+SELECT
+  customer_id,
+  customer_first_name,
+  customer_last_name
+FROM farmers_market.customer
+WHERE
+  customer_last_name = "Diaz"
+  OR customer_last_name = "Edwards"
+  OR customer_last_name = "Wilson"
+ORDER BY customer_last_name, customer_first_name
+```
+
+compared to:
+
+```{sql fig-3.11b, connection = farmers.db}
+SELECT
+  customer_id,
+  customer_first_name,
+  customer_last_name
+FROM farmers_market.customer
+WHERE
+  customer_last_name IN ("Diaz", "Edwards", "Wilson")
+ORDER BY customer_last_name, customer_first_name
+```
+
+Another example of the `IN` list comparison is if you're searching for a person in the `customer` table, but don't know the spelling of their name. You could search against multiple spellings like this:
+
+```{sql fig-3.11c, connection = farmers.db}
+SELECT
+  customer_id,
+  customer_first_name,
+  customer_last_name
+FROM farmers_market.customer
+WHERE
+  customer_last_name IN ("Renee", "Rene", "Renée", "René", "Renne")
+ORDER BY customer_last_name, customer_first_name
+```
+
+## `LIKE`
+
+Imagine there was a farmer's market customer you know as "Jerry" but you're not sure if he's listed as "Jerry" or "Jeremy" or "Jeremiah." We can use the wildcard character `%` to stand-in for any number of characters.
+
+```{sql fig-3.12, connection = farmers.db}
+SELECT
+  customer_id,
+  customer_first_name,
+  customer_last_name
+FROM farmers_market.customer
+WHERE
+  customer_first_name LIKE "Jer%"
+```
+
+## `IS NULL`
+
+The `IS NULL` condition can be used to filter for rows with missing data.
+
+```{sql fig-3.13, connection = farmers.db}
+SELECT *
+FROM farmers_market.product
+WHERE product_size IS NULL
+```
+
+"Blank" and `NULL` are not the same thing and you can check for blank strings with `''`.
+
+```{sql fig-3.13, connection = farmers.db}
+SELECT *
+FROM farmers_market.product
+WHERE 
+  product_size IS NULL
+  OR TRIM(product_size) = ''
+```
+
+### A Warning About Null Comparisons
+
+Because `NULL` isn't a value, it can't be compared to any existing value. So, a filter like `WHERE product_size = NULL` won't work.
+
+# Filtering Using Subqueries
+
+What if you wanted to filter a list of values that was returned by another query? You do that with a subquery. For example, say we wanted to analyze purchases that were made at the farmer's market on days when it rained. Let's start by writing the query that gets a list of market dates when it rained using this query:
+
+```{sql fig-3.18, connection = farmers.db}
+SELECT market_date, market_rain_flag
+FROM farmers_market.market_date_info
+WHERE market_rain_flag = 1
+```
+
+Now we can use this list of dates to return purchases on those dates. The query in the parentheses just returns the dates shown in Figure 3.18 and the "outer" query looks for `customer_purchases` records with a `market_date` value in that list of dates.
+
+```{sql fig-3.19, connection = farmers.db}
+SELECT
+  market_date,
+  customer_id,
+  vendor_id,
+  quantity * cost_to_customer_per_qty AS price
+FROM farmers_market.customer_purchases
+WHERE
+  market_date IN
+  (
+  SELECT market_date
+  FROM farmers_market.market_date_info
+  WHERE market_rain_flag = 1
+  )
+LIMIT 5
+```
+
+Creating results that depend on data in more than one table can also be accomplished using something called a `JOIN`.
+
+# Exercises Using the Included Database
+
+1.  Refer to the data in Table 3.1. Write a query that returns all customer purchases of product IDs 4 and 9.
+
+    ```{sql ex1, connection = farmers.db}
+    SELECT *
+    FROM farmers_market.customer_purchases
+    WHERE 
+      customer_id = 4 
+      OR customer_id = 9
+    ```
+
+2.  Write two queries, one using two conditions with an `AND` operator, and one using the `BETWEEN` operator, that will return all customer purchases made from vendors with vendor IDs between 8 and 10 (inclusive).
+
+    ```{sql ex2a, connection = farmers.db}
+    SELECT *
+    FROM farmers_market.customer_purchases
+    WHERE 
+      vendor_id >= 8 
+      AND vendor_id <= 10
+    ```
+
+    ```{sql ex2b, connection = farmers.db}
+    SELECT *
+    FROM farmers_market.customer_purchases
+    WHERE vendor_id BETWEEN 8 AND 10
+    ```
+
+3.  Can you think of two different ways to change the final query in the chapter so it would return purchases from days when it wasn't raining?
+
+    You could use the `NOT` operator to negate the `IN` condition. This will return TRUE for the rows in the `customer_purchases` table with a `market_date` that is `NOT IN` the query in the `WHERE` clause.
