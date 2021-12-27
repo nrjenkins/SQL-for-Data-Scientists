@@ -1,0 +1,57 @@
+---
+title: "Chapter 1: Data Sources"
+output: html_notebook
+---
+
+# Data Sources
+
+Data can be structured or unstructured. Structured data are data organized into a tabular format and unstructured data are text documents, images, etc. SQL allows you to create relationship between databases.
+
+# Tools for Connecting to Data Sources and Editing SQL
+
+The first step in a data analysis project is connecting to a database on a server. This is usually done through a SQL IDE or with code that connects to the database.
+
+# Relational Databases
+
+A database is a well defined spreadsheet, with row identifies and named column headers. Each table may store different subsets and types of data a different levels of detail.
+
+An entity is the "thing" (object or concept) that the table represents and captures data for. If there is a table that contains data about books, the entity is "Books" and the "Book table" is the data structure that contains information about the Book entity.
+
+To illustrate an example of a relationship between database tables, imagine that one table in a database contains a record (row) for every patient that's ever scheduled an appointment at a doctor's office, with each patient's name, birthdate, and phone number. Another table contains a record of every appointment, with the patient's name, appointment time, reason for the visit, and the name of the doctor the patient has an appointment with. The connection between these two tables could be the patient's name. To create a report of every patient who has an appointment scheduled in the next week along with their contact information, there would have to be an established connection between the patient directory table and the appointment table, enabling someone to pull data from both tables simultaneously.
+
+The *primary key* in a table is a column or combination of columns that uniquely identifies a row. When a table's primary key is referenced in another table, it is called a *foreign key*.
+
+The idea of not storing redundent data in a database is known as normalization. In the book database example, we only have to sore each author's full name once, no matter how many books they have written.
+
+# Dimensional Data Warehouses
+
+*Data warehouses* often contain data from multiple underlying data sources. A star schema design divides the data into facts and dimensions. A *fact table* contains the "metadata" of an entity, as well as any *measures* you want to track and later summarize. A *dimension* is a property of that entity you can group or "slice and dice" the fact records by, and a *dimension table* will contain further information of that property.
+
+For example, a transaction record of an item purchased at a retail store is a *fact*, containing the timestamp of the purchase, the store number, etc. The store the purchase was made at is a *dimension* of the item purchase *fact*, and the associated store *dimension table* would contain additional information about the store, such as its name.
+
+# Asking Questions About the Data Source
+
+Here are some questions you might want to ask the SMEs as you're first learning about the data source:
+
+1.  Which tables in this database should I look in first for the relevant data? Is there an entity-relationship diagram documenting the relationships between them that I can reference?
+
+2.  What set of fields make up the primary key for this table? or "What is the grain of this fact table?"
+
+3.  Are these records imported directly from the source system, or have they been transformed or merged in some way before being stored in this table?
+
+4.  Is this a static snapshot table, or does it update regularly? At what frequency does it update? Are older records expired and kept as new data is added, or is the existing record overwritten when changes occur?
+
+5.  Is this data collected automatically as events occur, or are the values entered by people? Do we have documentation on the interface that they can see with the data entry form field labels?
+
+# Introduction to the Farmer's Market Database
+
+The example database we'll be using for example queries serves as a tracking system for vendors, products, customers, and sales at a fictional farmer's market.
+
+# A Note of Machine Learning Dataset Terminology
+
+The set of values in each row can be used as inputs to train a model, and that row is often called a training example, instance, or data point. Each column is a feature or input variable. The column that contains the output variable is called the target variable.
+
+# Exercise Answers
+
+1.  If an author were to change their name, I would add another row to the Authors table with the new name and the same ID that the author had for their previous name. If the author full name field is updated (overwritten) in the existing Authors table record record for the author, then when a query is run to retrieve a list of authors and their books, all past books associated with the author will now be associated with the author's new name in the database.
+2.  I could track personal exercise routines. Entities would be workout sessions, exercises, and workout locations. Workout sessions and exercises would have a many-to-many relationship because each workout could contain multiple exercises and each exercise could be part of multiple workouts. The relationship between workout sessions and workout locations would be one-to-many assuming that each workout could only take place in one location, but each location could be the site of many workout sessions.
