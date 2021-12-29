@@ -18,3 +18,281 @@ farmers.db <-
             host = "localhost",
             port = 3306)
 ```
+
+# Exploratory Data Analysis with SQL
+
+EDA occurs before building predictive models. If you are given access to a database for the first time, these are the types of queries you can run to familiarize yourself with the tables and data in it. In the later EDA, once a dataset has been prepared, the focus is often on distributions of values, relationships between columns, and identifying correlations between input features and the target variable.
+
+# Demonstrating Exploratory Data Analysis with SQL
+
+The director of the Farmer's Market asks us to help them build some reports to use throughout the year, and gives us access to the database referenced in this book. They havent given us any specific report requirements, but they have told us that they'll be asking questions related to general product availability and purchase trends, and have given us the E-R diagram, so we know the relationship between the tables.
+
+We might guess that we should review the `product`, `vendor_inventory`, and `customer_purchases` tables. Some sensible questions to ask via query are:
+
+-   How large are the tables, and how far back in time does the data go?
+
+-   What kind of information is available about each product and each purchase?
+
+-   What is the granularity of each of these tables; what makes a row unique?
+
+-   Since we'll be looking at trends over time, what kind of date and time dimensions are available, and how do the different values look when summarized over time?
+
+-   How is the data in each table related to the other tables? How might we join them together to summarize the details for reporting?
+
+# Exploring the Products Table
+
+```{sql connection = farmers.db}
+DESCRIBE farmers_market.product
+```
+
+For a more general solution we use:
+
+```{sql fig-9.1, connection = farmers.db}
+SELECT * FROM farmers_market.product
+LIMIT 10
+```
+
+How can we check if `product_id` is the primary key?
+
+```{sql connection = farmers.db}
+SELECT product_id, count(*)
+FROM farmers_market.product
+GROUP BY product_id
+HAVING count(*) > 1
+```
+
+What about the product categories we see IDs for in the `product` table? How many different categories are there?
+
+```{sql fig-9.2, connection = farmers.db}
+SELECT * 
+FROM farmers_market.product_category
+```
+
+How many different products are there in the catalog-like product metadata table?
+
+```{sql fig-9.3, connection = farmers.db}
+SELECT count(*) AS unique_products
+FROM farmers_market.product
+```
+
+How many products are there per product category? We'll join the `product` table and the `product_category` table to pull in the category names that we think go with the IDs here, and count up the products in each category.
+
+```{sql fig-9.4, connection = farmers.db}
+SELECT
+  pc.product_category_id,
+  pc.product_category_name,
+  count(product_id) AS count_of_products
+FROM farmers_market.product_category AS pc
+LEFT JOIN farmers_market.product AS p
+  ON pc.product_category_id = p.product_category_id
+GROUP BY pc.product_category_id
+```
+
+# Exploring Possible Column Values
+
+What is in the `product_qty_type` field we saw in our first preview of the `product` table? And how many different quantity types are there?
+
+```{sql fig-9.5, connection = farmers.db}
+SELECT DISTINCT product_qty_type
+FROM farmers_market.product
+```
+
+Let's take a look at some of the data in the `vendor_inventory` table next:
+
+```{sql fig-9.6, connection = farmers.db}
+SELECT *
+FROM farmers_market.vendor_inventory
+LIMIT 10
+```
+
+Let's find the primary key. We can find this by grouping by the fields that we expect are unique and use `HAVING` to check whether there is more than one record with each combination.
+
+```{sql fig-9.7, connection = farmers.db}
+SELECT
+  market_date,
+  vendor_id,
+  product_id,
+  count(*)
+FROM farmers_market.vendor_inventory
+GROUP BY market_date, vendor_id, product_id
+HAVING count(*) > 1
+```
+
+How far does the data go back? When was the first market that was tracked in this database, and how recent is the latest data?
+
+```{sql fig-9.8, connection = farmers.db}
+SELECT
+  MIN(market_date),
+  MAX(market_date)
+FROM farmers_market.vendor_inventory
+```
+
+How many different vendors are there, and when did they each start selling at the market? And which are still selling at the most recent `market_date`?
+
+```{sql fig-9.9, connection = farmers.db}
+SELECT
+ vendor_id,
+ MIN(market_date),
+ MAX(market_date)
+FROM farmers_market.vendor_inventory
+GROUP BY vendor_id
+ORDER BY MIN(market_date), MAX(market_date)
+```
+
+# Exploring Changes Over Time
+
+Do most vendors sell at the market year-round, or is there a certain time of year when there are different numbers of vendors at the farmer's market?
+
+```{sql fig-9.10, connection = farmers.db}
+SELECT
+  EXTRACT(YEAR FROM market_date) AS market_year,
+  EXTRACT(MONTH FROM market_date) AS market_month,
+  COUNT(DISTINCT vendor_id) AS vendors_with_inventory
+FROM farmers_market.vendor_inventory
+GROUP BY EXTRACT(YEAR FROM market_date), EXTRACT(MONTH FROM market_date)
+ORDER BY EXTRACT(YEAR FROM market_date), EXTRACT(MONTH FROM market_date)
+```
+
+Now let's look at the details of what a particular vendor's inventory looks like.
+
+```{sql fig-9.11, connection = farmers.db}
+SELECT *
+FROM farmers_market.vendor_inventory
+WHERE vendor_id = 7
+ORDER BY market_date, product_id
+```
+
+# Exploring Multiple Table Simultaneously
+
+Let's jump to the `customer_purchases` table to get a sense of what the purchases of that product look like, compared to the vendor's inventory.
+
+```{sql fig-9.12, connection = farmers.db}
+SELECT *
+FROM farmers_market.customer_purchases
+LIMIT 10
+```
+
+Now we look closer at the purchases of vendor 7's product #4:
+
+```{sql fig-9.13, connection = farmers.db}
+SELECT *
+FROM farmers_market.customer_purchases
+WHERE vendor_id = 7 AND product_id = 4
+ORDER BY market_date, transaction_time
+```
+
+We could run the same query but filtered to, or sorted by, the `customer_id` to explore one customer's purchase history of a product in more detail:
+
+```{sql fig-9.14, connection = farmers.db}
+SELECT *
+FROM farmers_market.customer_purchases
+WHERE vendor_id = 7 AND product_id = 4 AND customer_id = 12
+ORDER BY market_date, transaction_time
+```
+
+Since we want to compare the sales per day to the inventory that the vendor brought to each market, we'll want to aggregate these sales by market date.
+
+```{sql fig-9.15, connection = farmers.db}
+SELECT 
+  market_date,
+  vendor_id,
+  product_id,
+  SUM(quantity) AS quantity_sold,
+  SUM(quantity * cost_to_customer_per_qty) AS total_sales
+FROM farmers_market.customer_purchases
+WHERE vendor_id = 7 AND product_id = 4
+GROUP BY market_date, vendor_id, product_id
+ORDER BY market_date, vendor_id, product_id
+```
+
+# Exploring Inventory vs. Sales
+
+This EDA has given us a sense of what the data in each of these related tables looks like, and now we can start joining them together to get a better sense of the relationship between entities. For example, now that we have aggregated the `customer_purchases` to the same granularity of the `vendor_inventory` table - one row per market date, vendor ID, and product ID - we can join the two tables together to view inventory side by side with sales.
+
+First, we join the two tables and display all columns to check that it's combining the way we expect it to.
+
+```{sql fig-9.16, connection = farmers.db}
+SELECT *
+FROM farmers_market.vendor_inventory AS vi
+  LEFT JOIN
+  (
+    SELECT 
+      market_date,
+      vendor_id,
+      product_id,
+      SUM(quantity) AS quantity_sold,
+      SUM(quantity * cost_to_customer_per_qty) AS total_sales
+    FROM farmers_market.customer_purchases
+    GROUP BY market_date, vendor_id, product_id
+  ) AS sales
+  ON vi.market_date = sales.market_date
+  AND vi.vendor_id = sales.vendor_id
+  AND vi.product_id = sales.product_ID
+ORDER BY vi.market_date, vi.vendor_id, vi.product_id
+LIMIT 10
+```
+
+This next query selects specific variables, adds additional "look up" vales and filters for vendor 7 and product 4.
+
+```{sql fig-9.17, connection = farmers.db}
+SELECT
+  vi.market_date,
+  vi.vendor_id,
+  v.vendor_name,
+  vi.product_id,
+  p.product_name,
+  vi.quantity AS quantity_available,
+  sales.quantity_sold,
+  vi.original_price,
+  sales.total_sales
+FROM farmers_market.vendor_inventory AS vi
+  LEFT JOIN
+  (
+    SELECT 
+      market_date,
+      vendor_id,
+      product_id,
+      SUM(quantity) AS quantity_sold,
+      SUM(quantity * cost_to_customer_per_qty) AS total_sales
+    FROM farmers_market.customer_purchases
+    GROUP BY market_date, vendor_id, product_id
+  ) AS sales
+    ON vi.market_date = sales.market_date
+    AND vi.vendor_id = sales.vendor_id
+    AND vi.product_id = sales.product_ID
+  LEFT JOIN farmers_market.vendor AS v
+    ON vi.vendor_id = v.vendor_id
+  LEFT JOIN farmers_market.product AS p
+    ON vi.product_id = p.product_id
+WHERE vi.vendor_id = 7 AND vi.product_id = 4
+ORDER BY vi.market_date, vi.vendor_id, vi.product_id, sales.quantity_sold
+```
+
+# Exercises
+
+1.  In the chapter, it was suggested that we should see if the `customer_purchases` data was collected for the same time frame as the vendor_inventory table. Write a query that gets the earliest and latest dates in the `customer_purchases` table.
+
+    ```{sql ex1, connection = farmers.db}
+    SELECT
+      MIN(market_date),
+      MAX(market_date)
+    FROM farmers_market.customer_purchases
+    ```
+
+2.  There is a MySQL function `DAYNAME()` that returns the name of the day of the week for a date. Using the `DAYNAME` and `EXTRACT` functions on the `customer_purchases` table, select and group by the weekday and hour of the day, and count the distinct number of customers during each hour of the Wednesday and Saturday markets. See Chapters 6, "Aggregating Results for Analysis," and 8, "Date and Time Functions," for information on the `COUNT DISTINCT` and `EXTRACT` functions.
+
+    ```{sql ex2, connection = farmers.db}
+    SELECT 
+      market_date,
+      DAYNAME(market_date) AS day_name,
+      EXTRACT(HOUR FROM transaction_time) AS hour,
+      COUNT(DISTINCT customer_id) AS n_customers
+    FROM farmers_market.customer_purchases
+    GROUP BY market_date, DAYNAME(market_date), EXTRACT(HOUR FROM transaction_time)
+    ```
+
+3.  What other questions haven't we yet asked about the data in these tables that you would be curious about? Write two more queries further exploring or summarizing the data in the `product`, `vendor_inventory`, or `customer_purchases` tables.
+
+```{sql ex3, connection = farmers.db}
+
+```
