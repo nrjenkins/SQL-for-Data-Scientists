@@ -293,6 +293,27 @@ ORDER BY vi.market_date, vi.vendor_id, vi.product_id, sales.quantity_sold
 
 3.  What other questions haven't we yet asked about the data in these tables that you would be curious about? Write two more queries further exploring or summarizing the data in the `product`, `vendor_inventory`, or `customer_purchases` tables.
 
-```{sql ex3, connection = farmers.db}
+    How many different customers bought Banana Peppers?
 
+```{sql ex3, connection = farmers.db}
+SELECT *
+FROM farmers_market.product
+WHERE product_name LIKE "%banana%"
+```
+
+```{sql connection = farmers.db}
+SELECT *
+FROM farmers_market.customer_purchases
+```
+
+```{sql connection = farmers.db}
+SELECT 
+  cp.product_id,
+  p.product_name,
+  COUNT(DISTINCT cp.customer_id) AS n_customers
+FROM farmers_market.customer_purchases AS cp
+LEFT JOIN farmers_market.product AS p
+  ON cp.product_id = p.product_id
+GROUP BY product_id, p.product_name
+HAVING product_name LIKE "%banana%"
 ```
