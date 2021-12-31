@@ -197,7 +197,7 @@ FROM farmers_market.customer_purchases
 
 `LAG` retrieves data from a row that is a selected number of rows back in the dataset.
 
-```{sql connection = farmers.db}
+```{sql fig-7.11, connection = farmers.db}
 SELECT
   market_date,
   vendor_id,

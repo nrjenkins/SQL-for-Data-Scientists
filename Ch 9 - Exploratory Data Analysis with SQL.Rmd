@@ -317,3 +317,15 @@ LEFT JOIN farmers_market.product AS p
 GROUP BY product_id, p.product_name
 HAVING product_name LIKE "%banana%"
 ```
+
+What are the average sales for each vendor for each month?
+
+```{sql connection = farmers.db}
+SELECT
+  vendor_id,
+  EXTRACT(MONTH FROM market_date) AS month,
+  SUM(quantity * cost_to_customer_per_qty) AS sales
+FROM farmers_market.customer_purchases
+GROUP BY vendor_id, EXTRACT(MONTH FROM market_date)
+ORDER BY vendor_id, EXTRACT(MONTH FROM market_date)
+```

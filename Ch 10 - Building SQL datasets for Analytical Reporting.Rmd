@@ -18,3 +18,380 @@ farmers.db <-
             host = "localhost",
             port = 3306)
 ```
+
+# Building SQL Datasets for Analytical Reporting
+
+In the data analysis world, being asked questions, exploring a database, writing SQL statements to find and pull the data needed to determine the answers, and conducting the analysis of that data to calculate the answers to the questions, is called *ad-hoc* reporting.
+
+Any data analyst or data scientist should be able to listen to a question from a business stakeholder, determine how it might be answered using data from the database, retrieve the data needed to answer it, calculate the answer, and present the results in a form that the business stakeholder can understand and use to make decisions.
+
+# Thinking Through Analytical Dataset Requirements
+
+It's important to write queries that combine and summarize data in a way that can then be used to answer many similar questions that might be offshoots of the original question.
+
+In talking about summary sales and time, I would first think about all of the different time periods by which someone might want to "slice and dice" market sales. Someone could ask to summarize sales by minute, hour, day, week, month, year, and so on. Then I would think about dimensions other than time that people might want to filter or summarize sales by, such as vendor or customer zip code.
+
+We are designing a data set to have one row per date and vendor.
+
+```{sql fig-10.2, connection = farmers.db}
+SELECT
+  market_date,
+  vendor_id,
+  quantity * cost_to_customer_per_qty
+FROM farmers_market.customer_purchases
+```
+
+After confirming that these are the values that I expect to see, I group by `vendor_id` and `market_date` `SUM` the calculated column, round it to two decimal places, and give it an alias of `sales`.
+
+```{sql connection = farmers.db, output.var = "ex_query"}
+SELECT
+  market_date,
+  vendor_id,
+  ROUND(SUM(quantity * cost_to_customer_per_qty), 2) AS sales
+FROM farmers_market.customer_purchases
+GROUP BY market_date, vendor_id
+ORDER BY market_date, vendor_id
+```
+
+Now we can check if this data will allow us to answer our original questions:
+
+-   What were the total sales at the market last week?
+
+```{sql connection = farmers.db}
+SELECT
+  market_date,
+  vendor_id,
+  ROUND(SUM(quantity * cost_to_customer_per_qty), 2) AS sales,
+  DATE_SUB(market_date, INTERVAL 7 DAY) AS last_week
+FROM farmers_market.customer_purchases
+GROUP BY market_date, vendor_id
+ORDER BY market_date, vendor_id
+HAVING market_date < DATE_SUB(market_date, INTERVAL 7 DAY)
+```
+
+```{r}
+library(tidyverse)
+ex_query %>% 
+  group_by(market_date) %>% 
+  summarise(tot_sales = sum(sales))
+```
+
+-   How many of last week's sales were at the Wednesday market versus the Saturday market?
+
+```{sql connection = farmers.db}
+SELECT
+  DAYNAME(market_date) AS day,
+  ROUND(SUM(quantity * cost_to_customer_per_qty), 2) AS sales
+FROM farmers_market.customer_purchases
+GROUP BY DAYNAME(market_date)
+```
+
+Or in R:
+
+```{r}
+library(lubridate)
+ex_query %>% 
+  mutate(day = wday(market_date, label = TRUE)) %>% 
+  group_by(day) %>% 
+  summarise(tot_sales = sum(sales))
+```
+
+-   Can we calculate the total sales over another time period?
+
+```{sql connection = farmers.db}
+SELECT
+  EXTRACT(MONTH FROM market_date) AS month,
+  ROUND(SUM(quantity * cost_to_customer_per_qty), 2) AS sales
+FROM farmers_market.customer_purchases
+GROUP BY EXTRACT(MONTH FROM market_date)
+ORDER BY EXTRACT(MONTH FROM market_date)
+```
+
+```{r}
+# ex: sales by month
+ex_query %>% 
+  mutate(month = month(market_date, label = TRUE)) %>% 
+  group_by(month) %>% 
+  summarise(tot_sales = sum(sales)) %>% 
+  arrange(month)
+```
+
+-   Can we track the weekly market sales over time?
+
+```{sql connection = farmers.db}
+SELECT
+  WEEK(market_date) AS week,
+  ROUND(SUM(quantity * cost_to_customer_per_qty), 2) AS sales
+FROM farmers_market.customer_purchases
+GROUP BY WEEK(market_date)
+ORDER BY WEEK(market_date) 
+```
+
+Or in R:
+
+```{r}
+ex_query %>% 
+  mutate(week = week(market_date)) %>% 
+  group_by(week) %>% 
+  summarise(tot_sales = sum(sales)) %>% 
+  arrange(week)
+```
+
+-   Can we break down the weekly sales by vendor?
+
+```{sql connection = farmers.db}
+SELECT
+  WEEK(market_date) AS week,
+  vendor_id,
+  ROUND(SUM(quantity * cost_to_customer_per_qty), 2) AS sales
+FROM farmers_market.customer_purchases
+GROUP BY WEEK(market_date), vendor_id
+ORDER BY WEEK(market_date), vendor_id
+```
+
+Or in R:
+
+```{r}
+ex_query %>% 
+  mutate(week = week(market_date)) %>% 
+  group_by(week, vendor_id) %>% 
+  summarise(tot_sales = sum(sales)) %>% 
+  arrange(week, vendor_id)
+```
+
+It might be a good idea to include data on the market day, week, year, vendor name, and vendor type in the vendor table.
+
+```{sql fig-10.3, connection = farmers.db}
+SELECT
+  cp.market_date,
+  md.market_day,
+  md.market_week,
+  md.market_year,
+  cp.vendor_id,
+  v.vendor_name,
+  v.vendor_type,
+  ROUND(SUM(cp.quantity * cp.cost_to_customer_per_qty), 2) AS salse
+FROM farmers_market.customer_purchases AS cp
+  LEFT JOIN farmers_market.market_date_info AS md
+    ON cp.market_date = md.market_date
+  LEFT JOIN farmers_market.vendor AS v
+    ON cp.vendor_id = v.vendor_id
+GROUP BY cp.market_date, cp.vendor_id
+ORDER BY cp.market_date, cp.vendor_id
+```
+
+# Using Custom Analytical Datasets in SQL: CTEs and Views
+
+There are multiple ways to store queries for reuse in reports and other analyses. Here, we cover two approaches for more easily querying from the results of custom dataset queries you build: *Common Table Expressions* and *views*.
+
+*Common Table Expressions* (CTEs), also known as "`WITH` clauses" allow you to create an alias for an entire query, which allows you to reference it in other queries like you would any database table.
+
+The syntax for CTEs is:
+
+```{sql eval = FALSE}
+WITH [query_alias] AS
+(
+  [query]
+),
+[query_2_alias] AS
+(
+  [query_2]
+)
+SELECT [column list]
+FROM [query_alias]
+```
+
+where "\[query_alias\]" is a placeholder for the name you want to use to refer to a query later, and "\[query\]" is a placeholder for the query you want to reuse. Then below the `WITH` clause, you start your `SELECT` statement like you normally would, and use the query aliases to refer to the results of each of them.
+
+For example, if we wanted to reuse the previous query we wrote to generate the dataset of sales summarized by date and vendor for a report that summarizes sales by market week, we could put that query inside a `WITH` clause, then query from it using another `SELECT` statement like so:
+
+```{sql fig-10.4, connection = farmers.db}
+WITH sales_by_day_vendor AS
+(
+  SELECT
+    cp.market_date,
+    md.market_day,
+    md.market_week,
+    md.market_year,
+    cp.vendor_id,
+    v.vendor_name,
+    v.vendor_type,
+    ROUND(SUM(cp.quantity * cp.cost_to_customer_per_qty), 2) AS sales
+  FROM farmers_market.customer_purchases AS cp  
+  LEFT JOIN farmers_market.market_date_info AS md
+    ON cp.market_date = md.market_date
+  LEFT JOIN farmers_market.vendor AS v
+    ON cp.vendor_id = v.vendor_id
+  GROUP BY cp.market_date, cp.vendor_id
+  ORDER BY cp.market_date, cp.vendor_id
+)
+
+SELECT
+  s.market_year,
+  s.market_week,
+  SUM(s.sales) AS weekly_sales
+FROM sales_by_day_vendor AS s
+GROUP BY s.market_year, s.market_week
+```
+
+Notice how the `SELECT` statement at the bottom references the `sales_by_day_vendor` Common Table Expression using its alias, treating it just like a table, and even giving it an even shorter alias, `s`. By using a `WITH` statement instead of a subquery, it keeps this query at the bottom cleaner and easier to understand.
+
+Another approach is to develop a `SELECT` statement that depends on a custom dataset in a SQL editor window, or inside other code such as a Python script, without first including the entire CTE. This involves storing the query as a database *view*. A view is treated just like a table in SQL, the only difference being that it has run when it's referenced to dynamically generate a result set.
+
+If you want to store your dataset as a view, you simply precede your `SELECT` statement with "`CREATE VIEW` \[schema_name\].\[view_name\] `AS`", replacing the bracketed statements with the actual schema name, and the name you are giving the view.
+
+```{sql connection = farmers.db}
+CREATE VIEW farmers_market.vw_sales_by_day_vendor AS
+SELECT
+  cp.market_date,
+  md.market_day,
+  md.market_week,
+  md.market_year,
+  cp.vendor_id,
+  v.vendor_name,
+  v.vendor_type,
+  ROUND(SUM(cp.quantity * cp.cost_to_customer_per_qty), 2) AS sales
+FROM farmers_market.customer_purchases AS cp
+LEFT JOIN farmers_market.market_date_info AS md
+  ON cp.market_date = md.market_date
+LEFT JOIN farmers_market.vendor AS v
+  ON cp.vendor_id = v.vendor_id
+GROUP BY cp.market_date, cp.vendor_id
+ORDER BY cp.market_date, cp.vendor_id
+```
+
+Since the dataset we created has one row per market date per vendor, we can filter this view by `vendor_id` and a range of `market_date` values, just like we could if it were a table:
+
+```{sql connection = farmers.db}
+SELECT *
+FROM farmers_market.vw_sales_by_day_vendor AS s
+WHERE s.market_date BETWEEN "2020-04-01" AND "2020-04-30"
+  AND s.vendor_id = 7
+ORDER BY market_date
+```
+
+The results of CTEs and views are not stored, rather they pull the data dynamically each time they are referenced. So, if you use the preceding SQL to report on weekly sales using the `vw_sales_by_day_vendor` view, each time you run the query, it will include the latest week for which data exists in the `customer_purchases` table.
+
+# Taking SQL Reporting Further
+
+The last query in Chapter 9 creates a dataset that has one row per `market_date`, `vendor_id`, and `product_id`, and includes information about the vendor and product. This is an example of an analytical dataset that can be reused for many report variations.
+
+Some examples of questions that could be answered with that dataset include:
+
+-   What quantity of each product did each vendor sell per market/week/month/year?
+
+-   When are certain products in seasons?
+
+-   What percentage of each vendor's inventory is selling per time period?
+
+-   Did the prices of any products change over time?
+
+-   What are the total sales per vendor for the season?
+
+-   How frequently do vendors discount their product prices?
+
+-   Which vendor sold the most tomatoes last week?
+
+The following query adds fields calculating the precentage of product quantity sold and the total discount and aliases them `percent_of_available_sold` and `discount_amount`, respectively.
+
+```{sql connection = farmers.db}
+CREATE VIEW farmers_market.vw_sales_per_date_vendor_product AS
+SELECT
+  vi.market_date,
+  vi.vendor_id,
+  v.vendor_name,
+  vi.product_id,
+  p.product_name,
+  vi.quantity AS quantity_available,
+  sales.quantity_sold,
+  ROUND((sales.quantity_sold / vi.quantity) * 100, 2) AS percent_of_available_sold,
+  vi.original_price,
+  (vi.original_price * sales.quantity_sold) - sales.total_sales AS discount_amount,
+  sales.total_sales
+FROM farmers_market.vendor_inventory AS vi
+  LEFT JOIN
+  (
+    SELECT 
+      market_date,
+      vendor_id,
+      product_id,
+      SUM(quantity) AS quantity_sold,
+      SUM(quantity * cost_to_customer_per_qty) AS total_sales
+    FROM farmers_market.customer_purchases
+    GROUP BY market_date, vendor_id, product_id
+  ) AS sales
+    ON vi.market_date = sales.market_date
+    AND vi.vendor_id = sales.vendor_id
+    AND vi.product_id = sales.product_ID
+  LEFT JOIN farmers_market.vendor AS v
+    ON vi.vendor_id = v.vendor_id
+  LEFT JOIN farmers_market.product AS p
+    ON vi.product_id = p.product_id
+WHERE vi.vendor_id = 7 AND vi.product_id = 4
+ORDER BY vi.market_date, vi.vendor_id, vi.product_id, sales.quantity_sold
+```
+
+# Exercises
+
+1.  Using the view created in this chapter called `farmers_market.vw_sales_by_day_vendor` , referring to Figure 10.3 for a preview of the data in the dataset, write a query to build a report that summarizes the sales per vendor per market week.
+
+    ```{sql ex1, connection = farmers.db}
+    SELECT
+      market_week,
+      vendor_id,
+      SUM(sales) AS sales
+    FROM farmers_market.vw_sales_by_day_vendor
+    GROUP BY market_week, vendor_id
+    ```
+
+2.  Rewrite the query associated with Figure 7.11 using a CTE (`WITH` clause).
+
+    ```{sql ex2, connection = farmers.db}
+    WITH x AS
+    (
+      SELECT
+        market_date,
+        vendor_id,
+        booth_number,
+        LAG(booth_number, 1) OVER (PARTITION BY vendor_id ORDER BY market_date, vendor_id)
+          AS previous_booth_number
+      FROM farmers_market.vendor_booth_assignments
+      ORDER BY market_date, vendor_id, booth_number
+    )
+
+    SELECT *
+    FROM x
+    WHERE
+      x.market_date = "2020-04-13"
+      AND
+      (x.booth_number <> x.previous_booth_number
+      OR x.previous_booth_number IS NULL)
+    ```
+
+3.  If you were asked to build a report of total and average market sales by vendor booth type, how might you modify the query associated with Figure 10.3 to include the information needed for your report?
+
+    I would group on the `vendor_type`.
+
+    ```{sql ex3, connection = farmers.db}
+    SELECT
+      cp.market_date,
+      md.market_day,
+      md.market_week,
+      md.market_year,
+      cp.vendor_id,
+      v.vendor_name,
+      v.vendor_type,
+      ROUND(SUM(cp.quantity * cp.cost_to_customer_per_qty), 2) AS sales
+    FROM farmers_market.customer_purchases AS cp
+      LEFT JOIN farmers_market.market_date_info AS md
+        ON cp.market_date = md.market_date
+      LEFT JOIN farmers_market.vendor AS v
+        ON cp.vendor_id = v.vendor_id
+      LEFT JOIN farmers_market.vendor_booth_assignments AS vba
+        ON cp.vendor_id = vba.vendor_id
+        AND cp.market_date = vba.market_date
+      LEFT JOIN farmers_market.booth AS b
+        ON vba.booth_number = b.booth_number
+    GROUP BY cp.market_date, cp.vendor_id
+    ORDER BY cp.market_date, cp.vendor_id
+    ```
