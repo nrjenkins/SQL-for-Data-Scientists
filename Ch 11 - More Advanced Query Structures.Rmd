@@ -1,0 +1,432 @@
+---
+title: "Chapter 11: More Advanced Query Structures"
+output: html_notebook
+---
+
+# Setup Database
+
+```{r setup}
+library(pacman)
+p_load(dplyr, DBI)
+
+# Create a database table in memory
+farmers.db <- 
+  dbConnect(RMariaDB::MariaDB(), 
+            group = "/Users/nickjenkins/Documents/Workshops & Conferences/SQL for Data Scientists/SQL for Data Scientists support files/FarmersMarketDatabase.sql",
+            username = "root",
+            password = "Hockeydude25",
+            host = "localhost",
+            port = 3306)
+```
+
+# More Advanced Query Structures
+
+# `UNION`s
+
+Using a `UNION` you can combine any two queries that result in the same number of columns with the same data types. They syntax is simple: write two queries with the same number and type of fields, and put a `UNION` keyword between them:
+
+```{sql connection = farmers.db}
+SELECT 
+  market_year, 
+  MIN(market_date) AS first_market_date
+FROM farmers_market.market_date_info
+WHERE market_year = "2019"
+
+UNION
+
+SELECT 
+  market_year, 
+  MIN(market_date) AS first_market_date
+FROM farmers_market.market_date_info
+WHERE market_year = "2020"
+```
+
+For a more complex example combining CTEs and `UNION`s, we'll build a report that shows the products with the largest quantities available to each market: the bulk product with the largest weight available, and the unit product with the highest count available:
+
+```{sql connection = farmers.db}
+WITH product_quantity_by_date AS
+(
+  SELECT
+    vi.market_date,
+    vi.product_id,
+    p.product_name,
+    p.product_qty_type,
+    SUM(vi.quantity) AS total_quantity_available
+  FROM farmers_market.vendor_inventory AS vi
+  LEFT JOIN farmers_market.product AS p
+    ON vi.product_id = p.product_id
+  GROUP BY market_date, product_id, product_name, product_qty_type
+)
+
+SELECT *
+FROM
+(
+  SELECT
+    market_date,
+    product_id,
+    product_name,
+    total_quantity_available,
+    product_qty_type,
+    RANK() OVER (PARTITION BY market_date ORDER BY total_quantity_available DESC) AS quantity_rank
+  FROM product_quantity_by_date
+  WHERE product_qty_type = "unit"
+  
+  UNION
+  
+  SELECT
+    market_date, 
+    product_id,
+    product_name,
+    total_quantity_available,
+    product_qty_type,
+    RANK() OVER (PARTITION BY market_date ORDER BY total_quantity_available DESC) AS quantity_rank
+  FROM product_quantity_by_date
+  WHERE product_qty_type = "lbs"
+) x
+
+WHERE x.quantity_rank = 1
+ORDER BY market_date
+```
+
+The `WITH` statement at the top of this query totals up the quantity of each product that is available at each market from the `vendor_invenroty` table, and joins in helpful information from the product table such as product name and the type of quantity, which has `product_aty_type` values of "lbs" or "unit."
+
+The inner part of the bottom query contains two different queries of the same view created in the CTE, `product_quantity_by_date`, `UNION`ed together. Each ranks the information available in the CTE by `total_quantity_available` as well as returning all of the available fields.
+
+Here is the same result without the `UNION` statement:
+
+```{sql connection = farmers.db}
+WITH product_quantity_by_date AS
+(
+  SELECT
+    vi.market_date,
+    vi.product_id,
+    p.product_name,
+    p.product_qty_type,
+    SUM(vi.quantity) AS total_quantity_available
+  FROM farmers_market.vendor_inventory AS vi
+  LEFT JOIN farmers_market.product AS p
+    ON vi.product_id = p.product_id
+  GROUP BY market_date, product_id, product_name, product_qty_type
+),
+rank_by_qty_type AS
+(
+  SELECT
+    market_date, 
+    product_id,
+    product_name,
+    total_quantity_available,
+    product_qty_type,
+    RANK() OVER (PARTITION BY market_date, product_qty_type ORDER BY 
+    total_quantity_available DESC) AS quantity_rank
+  FROM product_quantity_by_date
+)
+
+SELECT * 
+FROM rank_by_qty_type
+WHERE quantity_rank = 1
+ORDER BY market_date
+```
+
+We were able to accomplish the same result without the `UNION` by partitioning by both the `market_date` and `product_qty_type` in the `RANK()` function, resulting in a ranking for each date and quantity type.
+
+# Self-Join to Determine To-Date Maximum
+
+A *self-join* in SQL is when a table is joined to itself in order to compare rows to one another.
+
+Let's say we wanted to show an aggregate metric changing over time, comparing each value to all previous values. One reasons you might want to compare a value to all previous values it to create a "record high to-date" indicator.
+
+As an example, we create a report showing whether the total sales on each market date were the highest for any market to-date. If we were always looking at data filtered to dates before a selected date, we could simply use the `SUM()` and `MAX()` functions to determine the highest total sales for the given date range. But, we want to determine whether there is any previous date that has a higher sales total than the "current" row we're looking at, and we can use a self-join to do that comparison. First, we'll need to summarize the sales by `market_date`, which we have done previously. We'll put this query into a CTE and alias it `sales_per_market_date`.
+
+```{sql fig-11.2, connection = farmers.db}
+WITH sales_per_market_date AS
+(
+  SELECT
+    market_date,
+    ROUND(SUM(quantity * cost_to_customer_per_qty), 2) AS sales
+  FROM farmers_market.customer_purchases
+  GROUP BY market_date
+  ORDER BY market_date
+)
+
+SELECT *
+FROM sales_per_market_date
+LIMIT 10
+```
+
+We can select data from the "table" twice. We do this by joining the table to itself on every row where the row has a date that occurred prior to the "current" row's date.
+
+```{sql fig-11.3, connection = farmers.db}
+WITH sales_per_market_date AS
+(
+  SELECT
+    market_date,
+    ROUND(SUM(quantity * cost_to_customer_per_qty), 2) AS sales
+  FROM farmers_market.customer_purchases
+  GROUP BY market_date
+  ORDER BY market_date
+)
+
+SELECT *
+FROM sales_per_market_date AS cm
+LEFT JOIN sales_per_market_date AS pm
+  ON pm.market_date < cm.market_date
+WHERE cm.market_date = "2019-04-13"
+```
+
+Now we'll use a `MAX()` function on the `pm.sales` field and `GROUP BY` `cm.market_date` to get previous highest sales value.
+
+```{sql fig-11.4, connection = farmers.db}
+WITH sales_per_market_date AS
+(
+  SELECT
+    market_date,
+    ROUND(SUM(quantity * cost_to_customer_per_qty), 2) AS sales
+  FROM farmers_market.customer_purchases
+  GROUP BY market_date
+  ORDER BY market_date
+)
+
+SELECT 
+  cm.market_date,
+  cm.sales,
+  MAX(pm.sales) AS previous_max_sales
+FROM sales_per_market_date AS cm
+LEFT JOIN sales_per_market_date AS pm
+  ON pm.market_date < cm.market_date
+WHERE cm.market_date = "2019-04-13"
+GROUP BY cm.market_date, cm.sales
+```
+
+We can now remove the date filter in the `WHERE` clause to get the `previous_max` sales for each date. We can also use a `CASE` statement to create a flag field that indicates whether the current sales are higher than the previous maximum sales, indicating whether each row's `market_date` set a sales record as of that date.
+
+```{sql fig-11.5, connection = farmers.db}
+WITH sales_per_market_date AS
+(
+  SELECT
+    market_date,
+    ROUND(SUM(quantity * cost_to_customer_per_qty), 2) AS sales
+  FROM farmers_market.customer_purchases
+  GROUP BY market_date
+  ORDER BY market_date
+)
+
+SELECT 
+  cm.market_date,
+  cm.sales,
+  MAX(pm.sales) AS previous_max_sales,
+  CASE WHEN cm.sales > MAX(pm.sales) THEN "YES" ELSE "NO"
+  END sales_record_set
+FROM sales_per_market_date AS cm
+LEFT JOIN sales_per_market_date AS pm
+  ON pm.market_date < cm.market_date
+GROUP BY cm.market_date, cm.sales
+```
+
+# Counting New vs. Returning Customers by Week
+
+Another common report has to do with summarizing customers by time period. The manager of the farmer's market might want to monitor how many customers are visiting the market per week, and how many of those are new, making a purchase for the first time.
+
+One way to determine if a customer is new is to compare the purchase date to the minimum purchase date per customer.
+
+```{sql fig-11.6, connection = farmers.db}
+SELECT
+  DISTINCT customer_id,
+  market_date,
+  MIN(market_date) OVER(PARTITION BY cp.customer_id) AS first_purchase_date
+FROM farmers_market.customer_purchases AS CP
+```
+
+Now we can put this query inside a `WITH` clause and query its results with some calculations added. We also need to join it to the `market_date_info` table to get the year and week of each `market_date`.
+
+```{sql fig-11.7, connection = farmers.db}
+WITH customer_markets_attended AS
+(
+  SELECT DISTINCT
+    customer_id,
+    market_date,
+    MIN(market_date) OVER(PARTITION BY cp.customer_id) AS first_purchase_date
+  FROM farmers_market.customer_purchases AS CP
+)
+
+SELECT
+  md.market_year,
+  md.market_week,
+  COUNT(customer_id) AS customer_visit_count,
+  COUNT(DISTINCT customer_id) AS distinct_customer_count
+FROM customer_markets_attended AS cma
+LEFT JOIN farmers_market.market_date_info AS md
+  ON cma.market_date = md.market_date
+GROUP BY md.market_year, md.market_week
+ORDER BY md.market_year, md.market_week
+```
+
+We could have produced this result with a simpler query, but now we have the data in a form that facilitates further analysis. We want to get a count of new customers per week, so let's add a column displaying what percent of each week's customers are new.
+
+```{sql fig-11.8, connection = farmers.db}
+WITH customer_markets_attended AS
+(
+  SELECT DISTINCT
+    customer_id,
+    market_date,
+    MIN(market_date) OVER(PARTITION BY cp.customer_id) AS first_purchase_date
+  FROM farmers_market.customer_purchases AS CP
+)
+
+SELECT
+  md.market_year,
+  md.market_week,
+  COUNT(customer_id) AS customer_visit_count,
+  COUNT(DISTINCT customer_id) AS distinct_customer_count,
+  COUNT(
+  DISTINCT
+  CASE WHEN cma.market_date = cma.first_purchase_date
+  THEN customer_id
+  ELSE NULL
+  END
+  ) AS new_customer_count,
+  COUNT(
+  DISTINCT
+  CASE WHEN cma.market_date = cma.first_purchase_date
+  THEN customer_id
+  ELSE NULL
+  END) / COUNT(DISTINCT customer_id)
+  AS new_customer_pct
+FROM customer_markets_attended AS cma
+LEFT JOIN farmers_market.market_date_info AS md
+  ON cma.market_date = md.market_date
+GROUP BY md.market_year, md.market_week
+ORDER BY md.market_year, md.market_week
+```
+
+# Exercises
+
+1.  Starting with the query associated with Figure 11.5, put the larger SELECT statement in a second CTE, and write a query that queries from its results to display the current record sales and associated market date. Can you think of another way to generate the same results?
+
+    ```{sql ex1, connection = farmers.db}
+    WITH sales_per_market_date AS
+    (
+      SELECT
+        market_date,
+        ROUND(SUM(quantity * cost_to_customer_per_qty), 2) AS sales
+      FROM farmers_market.customer_purchases
+      GROUP BY market_date
+      ORDER BY market_date
+    ), sales_records AS
+    (
+      SELECT 
+        cm.market_date,
+        cm.sales,
+        MAX(pm.sales) AS previous_max_sales,
+        CASE WHEN cm.sales > MAX(pm.sales) THEN "YES" ELSE "NO"
+        END sales_record_set
+      FROM sales_per_market_date AS cm
+      LEFT JOIN sales_per_market_date AS pm
+        ON pm.market_date < cm.market_date
+      GROUP BY cm.market_date, cm.sales
+    )
+
+    SELECT
+      market_date,
+      sales
+    FROM sales_records
+    WHERE sales_record_set = "YES"
+    ORDER BY market_date DESC
+    LIMIT 1
+    ```
+
+2.  Modify the "New vs. Returning Customers Per Week" report (associated with Figure 11.8) to summarize the counts by vendor by week.
+
+    ```{sql ex2, connection = farmers.db}
+    WITH customer_markets_attended AS
+    (
+      SELECT DISTINCT
+        customer_id,
+        vendor_id,
+        market_date,
+        MIN(market_date) OVER(PARTITION BY cp.customer_id, cp.vendor_id) AS first_purchase_date
+      FROM farmers_market.customer_purchases AS cp
+    )
+
+    SELECT
+      md.market_year,
+      md.market_week,
+      cmv.vendor_id,
+      COUNT(customer_id) AS customer_visit_count,
+      COUNT(DISTINCT customer_id) AS distinct_customer_count,
+      COUNT(
+      DISTINCT
+      CASE WHEN cmv.market_date = cmv.first_purchase_date
+      THEN customer_id
+      ELSE NULL
+      END
+      ) AS new_customer_count,
+      COUNT(
+      DISTINCT
+      CASE WHEN cmv.market_date = cmv.first_purchase_date
+      THEN customer_id
+      ELSE NULL
+      END) / COUNT(DISTINCT customer_id)
+      AS new_customer_pct
+    FROM customer_markets_attended AS cmv
+    LEFT JOIN farmers_market.market_date_info AS md
+      ON cmv.market_date = md.market_date
+    GROUP BY md.market_year, md.market_week, cmv.vendor_id
+    ORDER BY md.market_year, md.market_week, cmv.vendor_id
+    ```
+
+3.  Using a UNION , write a query that displays the market dates with the highest and lowest total sales.
+
+    ```{sql ex3, connection = farmers.db}
+    WITH sales_per_market_date AS
+    (
+      SELECT
+        market_date,
+        ROUND(SUM(quantity * cost_to_customer_per_qty), 2) AS sales
+      FROM farmers_market.customer_purchases
+      GROUP BY market_date
+    ), market_dates_ranked_by_sales AS
+    (
+      SELECT
+        market_date,
+        sales,
+        RANK() OVER (ORDER BY sales) AS sales_rank_asc,
+        RANK() OVER (ORDER BY sales) AS sales_rank_desc
+      FROM sales_per_market_date
+    )
+
+    SELECT 
+      market_date,
+      sales,
+      sales_rank_asc AS sales_rank
+    FROM market_dates_ranked_by_sales
+    WHERE sales_rank_asc = 1
+
+    UNION
+
+    SELECT 
+      market_date,
+      sales,
+      sales_rank_desc AS sales_rank
+    FROM market_dates_ranked_by_sales
+    WHERE sales_rank_desc = 1
+    ```
+
+    The solution in R:
+
+    First, pull the data:
+
+    ```{sql connection = farmers.db, output.var = "purchases"}
+    SELECT 
+      market_date,
+      ROUND(SUM(quantity * cost_to_customer_per_qty), 2) AS sales
+    FROM farmers_market.customer_purchases
+    GROUP BY market_date
+    ```
+
+    Now R:
+
+    ```{r}
+    library(tidyverse)
+    purchases %>% 
+      filter(sales == max(sales) | sales == min(sales))
+    ```
