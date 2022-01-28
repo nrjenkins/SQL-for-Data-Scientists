@@ -18,3 +18,425 @@ farmers.db <-
             host = "localhost",
             port = 3306)
 ```
+
+# Creating Machine Learning Datasets Using SQL
+
+In this chapter, we'll discuss the development of datasets for two types of algorithms: classification and time series models.
+
+A *binary classification model* predicts whether a record belongs to one category or another. In order to make predictions, the model needs to be trained. Binary classifiers are a type of *supervised learning* model, which means thy are trained by passing example rows of data labeled with each of the possible outcomes into the algorithm, so it can detect patterns and identify characteristics that are more strongly associated with one result or the other.
+
+A *time series model* preforms statistical operations on a series of measurements over time to forecast what the measurement might be at some point in time in the future.
+
+# Datasets for Time Series Models
+
+The simplest time series forecast uses a single variable measured over specified time intervals to predict the value of that same variable at a future point in time. For example, a model to predict the high temperature in a location tomorrow could have a dataset with year's worth of daily high temperatures measured at that location. The dataset would have one row per day, with one column for the date, and another for the daily high temperature measured. A time series algorithm could detect seasonal temperature patterns, long-term trends, and the most recent daily high temperatures to predict what the high temperature might be tomorrow.
+
+Let's create a dataset that allows us to plot a time series of farmer's market sales per week.
+
+```{sql connection = farmers.db, output.var = "ts.data"}
+SELECT
+  MIN(cp.market_date) AS first_market_date_of_week,
+  ROUND(SUM(cp.quantity * cp.cost_to_customer_per_qty), 2) AS weekly_sale
+FROM farmers_market.customer_purchases AS cp
+LEFT JOIN farmers_market.market_date_info AS md
+  ON cp.market_date = md.market_date
+GROUP BY md.market_year, md.market_week
+ORDER BY md.market_year, md.market_week
+```
+
+R also has packages for exponential smoothing models, so we'll use R to generate a sales forecast for the eight weeks beyond the last date in our dataset.
+
+```{r}
+p_load(tidyverse, modeltime, lubridate, tidymodels, xgboost, timetk)
+
+# series plot
+ts.data %>% 
+  filter(date >= "2020-03-01" & date <= "2020-11-22") %>% 
+  ggplot(aes(x = first_market_date_of_week, y = weekly_sale)) +
+  geom_line() +
+  scale_y_continuous(limits = c(580, 1250), 
+                     breaks = seq(from = 600, to = 1250, by = 50)) +
+  scale_x_date(date_breaks = "1 weeks") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90))
+
+f.data <- 
+  ts.data %>% 
+  filter(date >= "2020-03-01" & date <= "2020-11-22")
+
+# split the data
+splits <- initial_time_split(f.data, prop = 0.8)
+
+# exponential smoothing model
+exp.fit <- 
+  exp_smoothing() %>% 
+  set_engine(engine = "ets") %>% 
+  fit(weekly_sale ~ first_market_date_of_week, data = training(splits))
+
+# ARIMA model
+arima.fit <- 
+  arima_reg() %>% 
+  set_engine(engine = "auto_arima") %>% 
+  fit(weekly_sale ~ first_market_date_of_week, data = training(splits))
+
+# create a model table
+model.tbl <- modeltime_table(exp.fit, arima.fit)
+
+# calibrate the model to the testing set
+calibration.table <-
+  model.tbl %>% 
+  modeltime_calibrate(new_data = testing(splits))
+
+# visualize the forecast test
+calibration.table %>% 
+  modeltime_forecast(new_data = testing(splits),
+                     actual_data = f.data) %>% 
+  plot_modeltime_forecast(.interactive = FALSE)
+
+# forecast forward
+refit <- 
+  calibration.table %>% 
+  modeltime_refit(data = f.data)
+
+refit %>% 
+  modeltime_forecast(h = "3 weeks", actual_data = f.data) %>% 
+  plot_modeltime_forecast(.interactive = FALSE)
+```
+
+# Datasets for Binary Classification
+
+Classification algorithms detect patterns in training datasets, which contain example records from the past that fall into known categories, and use those detected patterns to then categorize new data. Binary classification algorithms categorize inputs into one of two outcomes, which are determined according to the purpose of the model and the available data.
+
+## Creating the Dataset
+
+As an example, we'll build a dataset that could be used to train a model that can predict an answer to the question "Will this customer who just made a purchase return to make another purchase within the next month?" The binary target variable is "makes another purchase within 30 days." In the following queries, the target variable `purchased_again_within_30_days` represents whether the customer returned within 30 days of making a purchase, without considering the calendar month.
+
+```{sql connection = farmers.db}
+WITH
+  customer_markets_attended AS
+  (
+    SELECT DISTINCT
+      customer_id,
+      market_date
+    FROM farmers_market.customer_purchases
+    ORDER BY customer_id, market_date
+  )
+
+SELECT 
+  cp.market_date,
+  cp.customer_id,
+  SUM(cp.quantity * cp.cost_to_customer_per_qty) AS purchase_total,
+  COUNT(DISTINCT cp.vendor_id) AS vendors_patronized,
+  COUNT(DISTINCT cp.product_id) AS different_products_purchased,
+  (SELECT MIN(cma.market_date)
+  FROM customer_markets_attended AS cma
+  WHERE cma.customer_id = cp.customer_id
+  AND cma.market_date > cp.market_date
+  GROUP BY cma.customer_id) AS customer_next_market_date,
+  DATEDIFF(
+  (SELECT MIN(cma2.market_date)
+  FROM customer_markets_attended AS cma2
+  WHERE cma2.customer_id = cp.customer_id
+  AND cma2.market_date > cp.market_date
+  GROUP BY cma2.customer_id),
+  cp.market_date) AS days_until_customer_next_market_date,
+  CASE WHEN
+  DATEDIFF(
+  (SELECT MIN(cma3.market_date)
+  FROM customer_markets_attended AS cma3
+  WHERE cma3.customer_id = cp.customer_id
+  AND cma3.market_date > cp.market_date
+  GROUP BY cma3.customer_id),
+  cp.market_date) <= 30
+  THEN 1
+  ELSE 0 END AS purchased_again_within_30_days
+FROM farmers_market.customer_purchases AS cp
+GROUP BY cp.customer_id, cp.market_date
+ORDER BY cp.customer_id, cp.market_date
+```
+
+-   The `purchase_total` column multiplies the quantity and cost of each item purchased and summing that up to get the total spent by each customer at each market date.
+
+-   The `vendors_patronized` column is a distinct count of how many different vendors the customer made purchases from that day
+
+-   The `different_products_purchased` column is a distinct count of how many different kinds of products the customer purchased
+
+-   The `customer_next_market_date` is generated by a subquery that references our CTE. Look at the code inside the parentheses after `different_products_purchased` and before `customer_next_market_date`. This subquery selects the minimum market date a customer attended, which occurs after the current row's `market_date` value. The `WHERE` clause of this subquery matches the subquery's `customer_id` with the main query's `customer_id`.
+
+-   The `days_until_customer_next_market_date` uses the same subquery but calculates the difference between the current row's date and that calculated next market date.
+
+-   The last column `purchased_again_within_30_days` uses the same calculation and wraps it inside a `CASE` statement that returns a binary flag indicating whether that next purchase was made within 30 days.
+
+## Expanding the Feature Set
+
+Let's add some columns that indicate which vendors each customer shopped at on each market day and flip the `days_until_customer_next_market_date` calculation to indicate how long it's been since the customer last shopped before the visit represented by the row:
+
+```{sql connection = farmers.db}
+WITH
+  customer_markets_attended AS
+  (
+    SELECT DISTINCT
+      customer_id,
+      market_date
+    FROM farmers_market.customer_purchases
+    ORDER BY customer_id, market_date
+  )
+
+SELECT 
+  cp.market_date,
+  cp.customer_id,
+  SUM(cp.quantity * cp.cost_to_customer_per_qty) AS purchase_total,
+  COUNT(DISTINCT cp.vendor_id) AS vendors_patronized,
+  MAX(CASE WHEN cp.vendor_id = 7 THEN 1 ELSE 0 END) AS purchased_from_vendor_7,
+  MAX(CASE WHEN cp.vendor_id = 8 THEN 1 ELSE 0 END) AS purchased_from_vendor_8,
+  COUNT(DISTINCT cp.product_id) AS different_products_purchased,
+  DATEDIFF(cp.market_date,
+  (SELECT MAX(cma.market_date)
+  FROM customer_markets_attended AS cma
+  WHERE cma.customer_id = cp.customer_id
+  AND cma.market_date > cp.market_date
+  GROUP BY cma.customer_id)) AS days_since_last_customer_market_date,
+  CASE WHEN
+  DATEDIFF(
+  (SELECT MIN(cma3.market_date)
+  FROM customer_markets_attended AS cma3
+  WHERE cma3.customer_id = cp.customer_id
+  AND cma3.market_date > cp.market_date
+  GROUP BY cma3.customer_id),
+  cp.market_date) <= 30 THEN 1 ELSE 0 END AS purchased_again_within_30_days
+FROM farmers_market.customer_purchases AS cp
+GROUP BY cp.customer_id, cp.market_date
+ORDER BY cp.customer_id, cp.market_date
+```
+
+Now let's add a column that represents the number of times each customer has shopped at a given farmer's market. To do this, we will move the `ROW_NUMBER()` into the `WHERE` clause to return the same count for `customer_markets_attended_count` as a version that has it in the main query even if the main query is filtered to a date range that doesn't include a customer's entire purchase history:
+
+```{sql connection = farmers.db}
+WITH
+  customer_markets_attended AS
+  (
+    SELECT DISTINCT
+      customer_id,
+      market_date,
+      ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY market_date) AS market_count
+    FROM farmers_market.customer_purchases
+    ORDER BY customer_id, market_date
+  )
+
+SELECT 
+  cp.market_date,
+  cp.customer_id,
+  (SELECT MAX(market_count)
+  FROM customer_markets_attended AS CMA
+  WHERE cma.customer_id = cp.customer_id
+  AND cma.market_date <= cp.market_date) AS customer_markets_attended_count
+FROM farmers_market.customer_purchases AS cp
+GROUP BY cp.customer_id, cp.market_date
+ORDER BY cp.customer_id, cp.market_date
+```
+
+## Feature Engineering
+
+The process of creating different input values that might be helpful to the prediction algorithm is called *feature engineering*. One important factor when engineering features is that each of these feature values is only what would be knowable as of the date represented by the row. We want to train the model on examples of customers with a variety of traits as of specific points in time that can be correlated with a specific outcome or target variable relative to that time.
+
+# Exercises
+
+1.  Add a column to the final query in the chapter that counts how many markets were attended by each customer in the past 14 days.
+
+    ```{sql connection = farmers.db}
+    WITH
+      customer_markets_attended AS
+      (
+        SELECT DISTINCT
+          customer_id,
+          market_date,
+          ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY market_date) AS market_count
+        FROM farmers_market.customer_purchases
+        ORDER BY customer_id, market_date
+      )
+
+    SELECT 
+      cp.market_date,
+      cp.customer_id,
+      EXTRACT(MONTH FROM cp.market_date) AS market_month,
+      SUM(cp.quantity * cp.cost_to_customer_per_qty) AS purchase_total,
+      COUNT(DISTINCT cp.vendor_id) AS vendors_patronized,
+      MAX(CASE WHEN cp.vendor_id = 7 THEN 1 ELSE 0 END) AS purchased_from_vendor_7,
+      MAX(CASE WHEN cp.vendor_id = 8 THEN 1 ELSE 0 END) AS purchased_from_vendor_8,
+      COUNT(DISTINCT cp.product_id) AS different_products_purchased,
+      DATEDIFF(cp.market_date,
+      (SELECT MAX(cma.market_date)
+      FROM customer_markets_attended AS cma
+      WHERE cma.customer_id = cp.customer_id
+      AND cma.market_date > cp.market_date
+      GROUP BY cma.customer_id)) AS days_since_last_customer_market_date,
+      (SELECT MAX(market_count)
+      FROM customer_markets_attended AS cma
+      WHERE cma.customer_id = cp.customer_id
+      AND cma.market_date <= cp.market_date) AS customer_markets_attended_count,
+      (SELECT COUNT(market_date)
+      FROM customer_markets_attended AS cma
+      WHERE cma.customer_id = cp.customer_id
+      AND cma.market_date < cp.market_date
+      AND DATEDIFF(cp.market_date, cma.market_date) <= 30) AS
+        customer_markets_attended_30days_count,
+      (SELECT COUNT(market_date)
+      FROM customer_markets_attended AS cma
+      WHERE cma.customer_id = cp.customer_id
+      AND cma.market_date < cp.market_date
+      AND DATEDIFF(cp.market_date, cma.market_date) <= 14) AS
+        customer_markets_attended_14days_count,
+      CASE WHEN
+      DATEDIFF(
+      (SELECT MIN(cma3.market_date)
+      FROM customer_markets_attended AS cma3
+      WHERE cma3.customer_id = cp.customer_id
+      AND cma3.market_date > cp.market_date
+      GROUP BY cma3.customer_id),
+      cp.market_date) <= 30 THEN 1 ELSE 0 END AS purchased_again_within_30_days
+    FROM farmers_market.customer_purchases AS cp
+    GROUP BY cp.customer_id, cp.market_date
+    ORDER BY cp.customer_id, cp.market_date
+    ```
+
+2.  Add a column to the final query in the chapter that contains a 1 if the customer purchased an item that cost over \$10, and a 0 if not. HINT: The calculation will follow the same form as the `purchased_from_vendor_x` flags.
+
+    ```{sql connection = farmers.db}
+    WITH
+      customer_markets_attended AS
+      (
+        SELECT DISTINCT
+          customer_id,
+          market_date,
+          ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY market_date) AS market_count
+        FROM farmers_market.customer_purchases
+        ORDER BY customer_id, market_date
+      )
+
+    SELECT 
+      cp.market_date,
+      cp.customer_id,
+      EXTRACT(MONTH FROM cp.market_date) AS market_month,
+      SUM(cp.quantity * cp.cost_to_customer_per_qty) AS purchase_total,
+      COUNT(DISTINCT cp.vendor_id) AS vendors_patronized,
+      MAX(CASE WHEN cp.vendor_id = 7 THEN 1 ELSE 0 END) AS purchased_from_vendor_7,
+      MAX(CASE WHEN cp.vendor_id = 8 THEN 1 ELSE 0 END) AS purchased_from_vendor_8,
+      COUNT(DISTINCT cp.product_id) AS different_products_purchased,
+      MAX(CASE WHEN cp.cost_to_customer_per_qty > 10 THEN 1 ELSE 0 END) AS
+        purchased_over_ten,
+      DATEDIFF(cp.market_date,
+      
+      (SELECT MAX(cma.market_date)
+      FROM customer_markets_attended AS cma
+      WHERE cma.customer_id = cp.customer_id
+      AND cma.market_date > cp.market_date
+      GROUP BY cma.customer_id)) AS days_since_last_customer_market_date,
+      
+      (SELECT MAX(market_count)
+      FROM customer_markets_attended AS cma
+      WHERE cma.customer_id = cp.customer_id
+      AND cma.market_date <= cp.market_date) AS customer_markets_attended_count,
+      
+      (SELECT COUNT(market_date)
+      FROM customer_markets_attended AS cma
+      WHERE cma.customer_id = cp.customer_id
+      AND cma.market_date < cp.market_date
+      AND DATEDIFF(cp.market_date, cma.market_date) <= 30) AS
+        customer_markets_attended_30days_count,
+      
+      (SELECT COUNT(market_date)
+      FROM customer_markets_attended AS cma
+      WHERE cma.customer_id = cp.customer_id
+      AND cma.market_date < cp.market_date
+      AND DATEDIFF(cp.market_date, cma.market_date) <= 14) AS
+        customer_markets_attended_14days_count,
+      
+      CASE WHEN
+      DATEDIFF(
+      (SELECT MIN(cma3.market_date)
+      FROM customer_markets_attended AS cma3
+      WHERE cma3.customer_id = cp.customer_id
+      AND cma3.market_date > cp.market_date
+      GROUP BY cma3.customer_id),
+      cp.market_date) <= 30 THEN 1 ELSE 0 END AS purchased_again_within_30_days
+
+    FROM farmers_market.customer_purchases AS cp
+    GROUP BY cp.customer_id, cp.market_date
+    ORDER BY cp.customer_id, cp.market_date
+    ```
+
+3.  Let's say that the farmer's market started a customer reward program that gave customers a market goods gift basket and branded reusable market bag when they had spent at least \$200 total. Create a flag field that indicates whether the customer has reached this loyal customer status. HINT: One way to accomplish this involves modifying the CTE (`WITH` clause) to include purchase totals, and adding a column to the main query with a similar structure to the one that calculates `customer_markets_attended_count` to calculate a running total spent.
+
+    ```{sql connection = farmers.db}
+    WITH
+      customer_markets_attended AS
+      (
+        SELECT DISTINCT
+          customer_id,
+          market_date,
+          SUM(quantity * cost_to_customer_per_qty) AS purchase_total,
+          ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY market_date) AS
+            market_count
+        FROM farmers_market.customer_purchases
+        GROUP BY customer_id, market_date
+        ORDER BY customer_id, market_date
+      )
+
+    SELECT 
+      cp.market_date,
+      cp.customer_id,
+      EXTRACT(MONTH FROM cp.market_date) AS market_month,
+      SUM(cp.quantity * cp.cost_to_customer_per_qty) AS purchase_total,
+      COUNT(DISTINCT cp.vendor_id) AS vendors_patronized,
+      MAX(CASE WHEN cp.vendor_id = 7 THEN 1 ELSE 0 END) AS purchased_from_vendor_7,
+      MAX(CASE WHEN cp.vendor_id = 8 THEN 1 ELSE 0 END) AS purchased_from_vendor_8,
+      COUNT(DISTINCT cp.product_id) AS different_products_purchased,
+      MAX(CASE WHEN cp.cost_to_customer_per_qty > 10 THEN 1 ELSE 0 END) AS
+        purchased_over_ten,
+      DATEDIFF(cp.market_date,
+      
+      (SELECT MAX(cma.market_date)
+      FROM customer_markets_attended AS cma
+      WHERE cma.customer_id = cp.customer_id
+      AND cma.market_date > cp.market_date
+      GROUP BY cma.customer_id)) AS days_since_last_customer_market_date,
+      
+      (SELECT MAX(market_count)
+      FROM customer_markets_attended AS cma
+      WHERE cma.customer_id = cp.customer_id
+      AND cma.market_date <= cp.market_date) AS customer_markets_attended_count,
+      
+      (SELECT COUNT(market_date)
+      FROM customer_markets_attended AS cma
+      WHERE cma.customer_id = cp.customer_id
+      AND cma.market_date < cp.market_date
+      AND DATEDIFF(cp.market_date, cma.market_date) <= 30) AS
+        customer_markets_attended_30days_count,
+      
+      (SELECT COUNT(market_date)
+      FROM customer_markets_attended AS cma
+      WHERE cma.customer_id = cp.customer_id
+      AND cma.market_date < cp.market_date
+      AND DATEDIFF(cp.market_date, cma.market_date) <= 14) AS
+        customer_markets_attended_14days_count,
+      
+      CASE WHEN
+      DATEDIFF(
+      (SELECT MIN(cma3.market_date)
+      FROM customer_markets_attended AS cma3
+      WHERE cma3.customer_id = cp.customer_id
+      AND cma3.market_date > cp.market_date
+      GROUP BY cma3.customer_id),
+      cp.market_date) <= 30 THEN 1 ELSE 0 END AS purchased_again_within_30_days,
+      
+      CASE WHEN
+      (SELECT SUM(purchase_total)
+      FROM customer_markets_attended AS cma
+      WHERE cma.customer_id = cp.customer_id
+      AND cma.market_date <= cp.market_date) > 200
+      THEN 1 ELSE 0 END AS spent_over_200
+
+    FROM farmers_market.customer_purchases AS cp
+    GROUP BY cp.customer_id, cp.market_date
+    ORDER BY cp.customer_id, cp.market_date
+    ```
