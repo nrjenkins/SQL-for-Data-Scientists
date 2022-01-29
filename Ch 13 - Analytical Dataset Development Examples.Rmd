@@ -1,0 +1,138 @@
+---
+title: "Chapter 13: Analytical Dataset Development Examples"
+output: html_notebook
+---
+
+# Setup Database
+
+```{r setup}
+library(pacman)
+p_load(dplyr, DBI)
+
+# Create a database table in memory
+farmers.db <- 
+  dbConnect(RMariaDB::MariaDB(), 
+            group = "/Users/nickjenkins/Documents/Workshops & Conferences/SQL for Data Scientists/SQL for Data Scientists support files/FarmersMarketDatabase.sql",
+            username = "root",
+            password = "Hockeydude25",
+            host = "localhost",
+            port = 3306)
+```
+
+The goal of this chapter is to learn how to design and build a dataset from the the Farmer's Market database to answer each of the following questions:
+
+-   What factors correlate with fresh produce sales?
+
+-   How do sales vary by customer zip code, market distance, and demographic data?
+
+-   How does product price distribution affect market sales?
+
+# What factors Correlate with Fresh Produce Sales?
+
+Let's say we're asked the analytical question "What factors are correlated with sales of fresh produce at the farmer's market?" To answer this we need to summarize different variables over periods of time and explore how sales during those same time periods change as each variable changes.
+
+We could choose to summarize each value per week and then create a scatterplot of the weekly pairs of numbers to visualize the relationship between them, for example. To do that for a variety of variables, we'll need to write a query that generates a dataset with one row per market week containing weekly summaries of each value to be explored. The question we will explore is: "As the number of different available products at the market increases, do sales of fresh produce go up or down?"
+
+First, we need to determine what products are considered "fresh produce" then calculate sales of those products per week, and pull in other variables summarized per week. We'll start by looking at all the different product categories to determine which make the most sense to use to answer this question.
+
+```{sql fig13.1, connection = farmers.db}
+SELECT * 
+FROM farmers_market.product_category 
+```
+
+The "Fresh Fruits & Vegetables" category is obvious, but there could also be fresh produce products in the "Plants & Flowers" and "Eggs & Meat" categories. Let's generate a list of all products in categories 1, 5, and 6.
+
+```{sql fig13.2, connection = farmers.db}
+SELECT *
+FROM farmers_market.product
+WHERE product_category_id IN (1, 5, 6)
+ORDER BY product_category_id
+```
+
+With the right filters, we can begin to design the dataset. We need some summary information about sales, which will need to come from the `customer_purchases` table. Data about availability comes from `vendor_inventory`.
+
+Because this is a question about something related to sales over time, we will start with the product sales part of the question, then join other information to the results of the query.
+
+We need to select the details needed to summarize sales per week for products in the "Fresh Fruits & Vegetables" category 1 by inner joining sales (`customer_purchases`) and products (`product`) by `product_id`.
+
+```{sql fig13.3, connection = farmers.db}
+SELECT *
+FROM farmers_market.customer_purchases AS cp
+  INNER JOIN farmers_market.product AS p
+  ON cp.product_id = p.product_id
+WHERE p.product_category_id = 1
+```
+
+We used `INNER JOIN` instead of `LEFT JOIN` because we aren't interested in products that don't have purchases.
+
+Since we are joining by week, we don't need the `transaction_time` field and we don't need data on the size of the product.
+
+We can join in the `market_date_info` table to get the week number. Here we will `RIGHT JOIN` it to the other tables, because we want to know whether there are market dates with no fresh produce sales at all and the `RIGHT JOIN` will still pull in market dates with no corresponding records in the `customer_purchases` table.
+
+```{sql fig13.4, connection = farmers.db}
+SELECT
+  cp.market_date,
+  cp.customer_id,
+  cp.quantity,
+  cp.cost_to_customer_per_qty,
+  p.product_category_id,
+  mdi.market_date,
+  mdi.market_week,
+  mdi.market_year,
+  mdi.market_rain_flag,
+  mdi.market_snow_flag
+FROM farmers_market.customer_purchases AS cp
+  INNER JOIN farmers_market.product AS p
+  ON cp.product_id = p.product_id
+  RIGHT JOIN farmers_market.market_date_info AS mdi
+  ON mdi.market_date = cp.market_date
+WHERE p.product_category_id = 1
+```
+
+With this query we still only get rows were customer purchases were made even though there are dates where no purchases were made. This is happening because the `WHERE` clause if filtering out the results without purchases. The solution is to put the filter in the `JOIN ON` clause instead of the `WHERE` clause.
+
+```{sql connection = farmers.db}
+SELECT
+  cp.market_date,
+  cp.customer_id,
+  cp.quantity,
+  cp.cost_to_customer_per_qty,
+  p.product_category_id,
+  mdi.market_date,
+  mdi.market_week,
+  mdi.market_year,
+  mdi.market_rain_flag,
+  mdi.market_snow_flag
+FROM farmers_market.customer_purchases AS cp
+  INNER JOIN farmers_market.product AS p
+  ON cp.product_id = p.product_id
+  AND p.product_category_id = 1
+  RIGHT JOIN farmers_market.market_date_info AS mdi
+  ON mdi.market_date = cp.market_date
+```
+
+We can summarize the customer purchases to one row per week to get sales per week by grouping on `market_year` and `market_week`, and we don't need the other columns with additional details about the purchases. Here we'll also use the `COALESCE` function which returns the first non-`NULL` value in a list of values. For example, if we had a query that returns a market date with no sales in product category 1, the `weekly_category1_sales` value would be `NULL`. If we want it to be 0 instead, we can use the syntax `COALSCE([value 1], 0)` which will return a - if "value 1" is `NULL`.
+
+To summarize, in that final line before the `FROM` clause, we're adding up the sales, converting the result to 0 if there are no sales, then rounding the numeric result to two digits.
+
+```{sql connection = farmers.db}
+SELECT
+  mdi.market_year,
+  mdi.market_week,
+  MAX(mdi.market_rain_flag) AS market_week_rain_flag,
+  MAX(mdi.market_snow_flag) AS market_week_snow_flag,
+  MIN(mdi.market_min_temp) AS min_temp,
+  MAX(mdi.market_max_temp) AS max_temp,
+  MIN(mdi.market_season) AS market_season,
+  ROUND(COALESCE(SUM(cp.quantity * cp.cost_to_customer_per_qty), 0), 2) AS
+    weekly_category1_sales
+FROM farmers_market.customer_purchases AS cp
+  INNER JOIN farmers_market.product AS p
+  ON cp.product_id = p.product_id
+  AND p.product_category_id = 1
+  RIGHT JOIN farmers_market.market_date_info AS mdi
+  ON mdi.market_date = cp.market_date
+GROUP BY mdi.market_year, mdi.market_week
+```
+
+Now we have total sales by week.
