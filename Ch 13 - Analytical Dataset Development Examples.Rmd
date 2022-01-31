@@ -91,7 +91,7 @@ WHERE p.product_category_id = 1
 
 With this query we still only get rows were customer purchases were made even though there are dates where no purchases were made. This is happening because the `WHERE` clause if filtering out the results without purchases. The solution is to put the filter in the `JOIN ON` clause instead of the `WHERE` clause.
 
-```{sql connection = farmers.db}
+```{sql fig13.5, connection = farmers.db}
 SELECT
   cp.market_date,
   cp.customer_id,
@@ -115,7 +115,7 @@ We can summarize the customer purchases to one row per week to get sales per wee
 
 To summarize, in that final line before the `FROM` clause, we're adding up the sales, converting the result to 0 if there are no sales, then rounding the numeric result to two digits.
 
-```{sql connection = farmers.db}
+```{sql fig13.6, connection = farmers.db}
 SELECT
   mdi.market_year,
   mdi.market_week,
@@ -136,3 +136,368 @@ GROUP BY mdi.market_year, mdi.market_week
 ```
 
 Now we have total sales by week.
+
+Some other aggregate values we could add to the dataset include the number of vendors carrying products in the category, the volume of inventory available for purchase, and special high-demand product seasonal availability. These values come from the `vendor_inventory` table and we will joing it to the `product` and `market_date_info` tables the same way and filter `product_category_id = 1` in the `JOIN` statement.
+
+```{sql fig13.7, connection = farmers.db}
+SELECT
+  mdi.market_date,
+  mdi.market_year,
+  mdi.market_week,
+  vi.*,
+  p.*
+FROM farmers_market.vendor_inventory AS vi
+  INNER JOIN farmers_market.product AS p
+    ON vi.product_id = p.product_id
+    AND p.product_category_id = 1
+  RIGHT JOIN farmers_market.market_date_info AS mdi
+    ON mdi.market_date = vi.market_date
+```
+
+Suppose we suspect that when the sweet corn vendors are at the market, some customers some that don't come at any other time of year. We want to know if overall fresh produce sales go up during the weeks when corn is available, so we'll create a product availability flag for product 16, sweet corn, called `corn_available_flag`:
+
+```{sql fig13.8, connection = farmers.db}
+SELECT
+  mdi.market_year,
+  mdi.market_week,
+  COUNT(DISTINCT vi.vendor_id) AS vendor_count,
+  COUNT(DISTINCT vi.product_id) AS unique_product_count,
+  SUM(CASE WHEN p.product_qty_type = "unit" THEN vi.quantity ELSE 0 END) AS
+    unit_products_qty,
+  SUM(CASE WHEN p.product_qty_type = "lbs" THEN vi.quantity ELSE 0 END) AS
+    bulk_products_lbs,
+  ROUND(COALESCE(SUM(vi.quantity * vi.original_price), 0), 2) AS 
+    total_product_value,
+  MAX(CASE WHEN p.product_id = 16 THEN 1 ELSE 0 END) AS corn_available_flag
+FROM farmers_market.vendor_inventory AS vi
+  INNER JOIN farmers_market.product AS p
+    ON vi.product_id = p.product_id
+  RIGHT JOIN farmers_market.market_date_info AS mdi
+    ON mdi.market_date = vi.market_date
+  GROUP BY mdi.market_year, mdi.market_week
+```
+
+I would be better to have a count of vendors selling products available at the entire market, in addition to the product availability for product category 1. To avoid joining in another query, we will remove the `product_category_id` filter and use `CASE` statements to create a set of fields that provides the same metrics.
+
+```{sql fig13.9, connection = farmers.db}
+SELECT
+  mdi.market_year,
+  mdi.market_week,
+  COUNT(DISTINCT vi.vendor_id) AS vendor_count,
+  COUNT(DISTINCT CASE WHEN p.product_category_id = 1 
+    THEN vi.vendor_id 
+    ELSE NULL END) AS vendor_count_product_category1,
+  COUNT(DISTINCT vi.product_id) AS unique_product_count,
+  SUM(CASE WHEN p.product_qty_type = "unit" THEN vi.quantity ELSE 0 END) AS
+    unit_products_qty,
+  SUM(CASE WHEN p.product_category_id = 1 AND p.product_qty_type = "unit"
+    THEN vi.quantity
+    ELSE 0 END) AS unit_products_qty_product_category1,
+  SUM(CASE WHEN p.product_qty_type = "lbs" THEN vi.quantity ELSE 0 END) AS
+    bulk_products_lbs,
+  SUM(CASE WHEN p.product_category_id = 1 AND p.product_qty_type = "lbs"
+    THEN vi.quantity
+    ELSE 0 END) AS bulk_products_qty_product_category1,
+  ROUND(COALESCE(SUM(vi.quantity * vi.original_price), 0), 2) AS 
+    total_product_value,
+  ROUND(COALESCE(SUM(CASE WHEN p.product_category_id = 1 
+    THEN vi.quantity * vi.original_price 
+    ELSE 0 END), 0), 2) AS total_product_value_product_category1,
+  MAX(CASE WHEN p.product_id = 16 THEN 1 ELSE 0 END) AS corn_available_flag
+FROM farmers_market.vendor_inventory AS vi
+  INNER JOIN farmers_market.product AS p
+    ON vi.product_id = p.product_id
+  RIGHT JOIN farmers_market.market_date_info AS mdi
+    ON mdi.market_date = vi.market_date
+  GROUP BY mdi.market_year, mdi.market_week
+```
+
+Now we combine the results of the two queries and alias them in the WITH clause then join the views:
+
+```{sql connection = farmers.db, output.var = "ts.data"}
+WITH my_customer_purchases AS
+(
+  SELECT
+    mdi.market_year,
+    mdi.market_week,
+    MAX(mdi.market_rain_flag) AS market_week_rain_flag,
+    MAX(mdi.market_snow_flag) AS market_week_snow_flag,
+    MIN(mdi.market_min_temp) AS min_temp,
+    MAX(mdi.market_max_temp) AS max_temp,
+    MIN(mdi.market_season) AS market_season,
+    ROUND(COALESCE(SUM(cp.quantity * cp.cost_to_customer_per_qty), 0), 2) AS
+      weekly_category1_sales
+  FROM farmers_market.customer_purchases AS cp
+    INNER JOIN farmers_market.product AS p
+    ON cp.product_id = p.product_id
+    AND p.product_category_id = 1
+    RIGHT JOIN farmers_market.market_date_info AS mdi
+    ON mdi.market_date = cp.market_date
+  GROUP BY mdi.market_year, mdi.market_week
+), 
+
+my_vendor_inventory AS
+(
+  SELECT
+    mdi.market_year,
+    mdi.market_week,
+    COUNT(DISTINCT vi.vendor_id) AS vendor_count,
+    COUNT(DISTINCT CASE WHEN p.product_category_id = 1 
+      THEN vi.vendor_id 
+      ELSE NULL END) AS vendor_count_product_category1,
+    COUNT(DISTINCT vi.product_id) AS unique_product_count,
+    SUM(CASE WHEN p.product_qty_type = "unit" THEN vi.quantity ELSE 0 END) AS
+      unit_products_qty,
+    SUM(CASE WHEN p.product_category_id = 1 AND p.product_qty_type = "unit"
+      THEN vi.quantity
+      ELSE 0 END) AS unit_products_qty_product_category1,
+    SUM(CASE WHEN p.product_qty_type = "lbs" THEN vi.quantity ELSE 0 END) AS
+      bulk_products_lbs,
+    SUM(CASE WHEN p.product_category_id = 1 AND p.product_qty_type = "lbs"
+      THEN vi.quantity
+      ELSE 0 END) AS bulk_products_qty_product_category1,
+    ROUND(COALESCE(SUM(vi.quantity * vi.original_price), 0), 2) AS 
+      total_product_value,
+    ROUND(COALESCE(SUM(CASE WHEN p.product_category_id = 1 
+      THEN vi.quantity * vi.original_price 
+      ELSE 0 END), 0), 2) AS total_product_value_product_category1,
+    MAX(CASE WHEN p.product_id = 16 THEN 1 ELSE 0 END) AS corn_available_flag
+  FROM farmers_market.vendor_inventory AS vi
+    INNER JOIN farmers_market.product AS p
+      ON vi.product_id = p.product_id
+    RIGHT JOIN farmers_market.market_date_info AS mdi
+      ON mdi.market_date = vi.market_date
+  GROUP BY mdi.market_year, mdi.market_week
+)
+
+SELECT *
+FROM my_vendor_inventory
+  LEFT JOIN my_customer_purchases
+    ON my_vendor_inventory.market_year = my_customer_purchases.market_year
+    AND my_vendor_inventory.market_week = my_customer_purchases.market_week
+  ORDER BY my_vendor_inventory.market_year, my_vendor_inventory.market_week
+```
+
+We can alter the final `SELECT` statement to include the prior week's product category 1 sales too, because the prior week's sales might be a good indicator of what to expect this week. We use the `LAG` window function.
+
+```{sql connection = farmers.db, output.var = "market.data"}
+WITH my_customer_purchases AS
+(
+  SELECT
+    mdi.market_year,
+    mdi.market_week,
+    MAX(mdi.market_rain_flag) AS market_week_rain_flag,
+    MAX(mdi.market_snow_flag) AS market_week_snow_flag,
+    MIN(mdi.market_min_temp) AS min_temp,
+    MAX(mdi.market_max_temp) AS max_temp,
+    MIN(mdi.market_season) AS market_season,
+    ROUND(COALESCE(SUM(cp.quantity * cp.cost_to_customer_per_qty), 0), 2) AS
+      weekly_category1_sales
+  FROM farmers_market.customer_purchases AS cp
+    INNER JOIN farmers_market.product AS p
+    ON cp.product_id = p.product_id
+    AND p.product_category_id = 1
+    RIGHT JOIN farmers_market.market_date_info AS mdi
+    ON mdi.market_date = cp.market_date
+  GROUP BY mdi.market_year, mdi.market_week
+), 
+
+my_vendor_inventory AS
+(
+  SELECT
+    mdi.market_year,
+    mdi.market_week,
+    COUNT(DISTINCT vi.vendor_id) AS vendor_count,
+    COUNT(DISTINCT CASE WHEN p.product_category_id = 1 
+      THEN vi.vendor_id 
+      ELSE NULL END) AS vendor_count_product_category1,
+    COUNT(DISTINCT vi.product_id) AS unique_product_count,
+    COUNT(DISTINCT CASE WHEN p.product_category_id = 1 
+      THEN vi.product_id 
+      ELSE NULL END) AS unique_product_count_product_category1,
+    SUM(CASE WHEN p.product_qty_type = "unit" THEN vi.quantity ELSE 0 END) AS
+      unit_products_qty,
+    SUM(CASE WHEN p.product_category_id = 1 AND p.product_qty_type = "unit"
+      THEN vi.quantity
+      ELSE 0 END) AS unit_products_qty_product_category1,
+    SUM(CASE WHEN p.product_qty_type <> "unit" THEN vi.quantity ELSE 0 END) AS
+      bulk_products_qty,
+    SUM(CASE WHEN p.product_category_id = 1 AND p.product_qty_type = "lbs"
+      THEN vi.quantity
+      ELSE 0 END) AS bulk_products_qty_product_category1,
+    ROUND(COALESCE(SUM(vi.quantity * vi.original_price), 0), 2) AS 
+      total_product_value,
+    ROUND(COALESCE(SUM(CASE WHEN p.product_category_id = 1 
+      THEN vi.quantity * vi.original_price 
+      ELSE 0 END), 0), 2) AS total_product_value_product_category1,
+    MAX(CASE WHEN p.product_id = 16 THEN 1 ELSE 0 END) AS corn_available_flag
+  FROM farmers_market.vendor_inventory AS vi
+    INNER JOIN farmers_market.product AS p
+      ON vi.product_id = p.product_id
+    RIGHT JOIN farmers_market.market_date_info AS mdi
+      ON mdi.market_date = vi.market_date
+  GROUP BY mdi.market_year, mdi.market_week
+)
+
+SELECT
+  mvi.market_year,
+  mvi.market_week,
+  mcp.market_week_rain_flag,
+  mcp.market_week_snow_flag,
+  mcp.min_temp,
+  mcp.max_temp,
+  mcp.market_season,
+  mvi.vendor_count,
+  mvi.vendor_count_product_category1,
+  mvi.unique_product_count,
+  mvi.unique_product_count_product_category1,
+  mvi.unit_products_qty,
+  mvi.unit_products_qty_product_category1,
+  mvi.bulk_products_qty,
+  mvi.bulk_products_qty_product_category1,
+  mvi.total_product_value,
+  mvi.total_product_value_product_category1,
+  LAG(mcp.weekly_category1_sales, 1) OVER 
+    (ORDER BY mvi.market_year, mvi.market_WEEK) AS previous_week_category1_sales,
+  mcp.weekly_category1_sales
+FROM my_vendor_inventory AS mvi
+  LEFT JOIN my_customer_purchases AS mcp
+    ON mvi.market_year = mcp.market_year
+    AND mvi.market_week = mcp.market_week
+  ORDER BY mvi.market_year, mvi.market_week
+```
+
+## Aside: Answering Research Questions
+
+1.  What factors correlate with produce sales?
+
+```{r}
+library(tidyverse)
+library(brms)
+library(cmdstanr)
+library(bayesplot)
+
+market.data <- 
+  market.data %>% 
+  mutate(across(c(market_week_rain_flag:max_temp, 
+                vendor_count:unique_product_count_product_category1), 
+                ~ as.numeric(.)),
+         market_season = as_factor(market_season))
+
+fit.1 <- brm(weekly_category1_sales ~ market_week_rain_flag +
+               market_week_snow_flag + unique_product_count,
+             family = hurdle_gamma(link = "log"),
+             data = market.data,
+             backend = "cmdstanr",
+             cores = 4)
+
+fit.1
+
+mcmc_plot(fit.1)
+```
+
+2.  As the number of different available products at the market increases, do sales of fresh produce go up or down?
+
+```{r}
+summary(market.data)
+
+ggplot(data = market.data,
+       aes(x = unique_product_count, y = weekly_category1_sales)) +
+  geom_point(position = position_jitter(width = 0.5, height = 0.5)) +
+  geom_smooth(method = "glm")
+```
+
+Fit a model:
+
+```{r}
+# zero-inflated gamma
+fit.2 <- brm(weekly_category1_sales ~ unique_product_count,
+             family = hurdle_gamma(link = "log"),
+             data = market.data %>% 
+               mutate(unique_product_count = as.numeric(unique_product_count)),
+             backend = "cmdstanr",
+             cores = 4)
+fit.2
+
+mcmc_plot(fit.2)
+```
+
+# How Do Sales Vary by Customer Zip Code, Market Distance, and Demographic Data?
+
+Can we integrate demographic data into this analysis? We could group all sales by zip code, be we might get more meaningful answers if we group sales by customer, then look at the summary statistics and distributions of per-customer sales totals by zip code.
+
+We can calculate the distance from the market by calculating the distances between the market location and some location associated with each zip code, such as a centrally located latittude and longitude.
+
+For this example, we will summarize the sales per customer, then join in the demographic data to every customer's record.
+
+```{sql fig13.13, connection = farmers.db}
+SELECT 
+  c.customer_id,
+  c.customer_zip,
+  DATEDIFF(MAX(market_date), MIN(market_date)) AS customer_durration_days,
+  COUNT(DISTINCT market_date) AS number_of_markets,
+  ROUND(SUM(quantity * cost_to_customer_per_qty), 2) AS total_spent,
+  ROUND(SUM(quantity * cost_to_customer_per_qty) / COUNT(DISTINCT market_date), 2)
+    AS average_spent_per_market
+FROM farmers_market.customer AS c
+  LEFT JOIN farmers_market.customer_purchases AS CP
+    ON cp.customer_id = c.customer_id
+GROUP BY c.customer_id
+```
+
+# How does Product Price Distribution Affect Market Sales?
+
+"What does our distribution of product prices look like at the market? Are our low-priced items or high-priced items generating more sales for the market?" We can answer these questions with window functions.
+
+First, we want to get the product pricing details prior to completing the level of summarization required to answer the questions.
+
+```{sql fig13.18, connection = farmers.db}
+SELECT
+  p.product_id,
+  p.product_name,
+  p.product_category_id,
+  p.product_qty_type,
+  vi.vendor_id,
+  vi.market_date,
+  SUM(vi.quantity),
+  AVG(vi.original_price)
+FROM farmers_market.product AS p
+  LEFT JOIN farmers_market.vendor_inventory AS vi
+  ON vi.product_id = p.product_id
+GROUP BY
+  p.product_id,
+  p.product_name,
+  p.product_category_id,
+  p.product_qty_type,
+  vi.vendor_id,
+  vi.market_date
+```
+
+Because we are looking at prices per season over time, we need to pull in the `market_season` from the `market_date_info` table.
+
+```{sql fig13.19, connection = farmers.db}
+SELECT
+  p.product_id,
+  p.product_name,
+  p.product_category_id,
+  p.product_qty_type,
+  vi.vendor_id,
+  MIN(MONTH(vi.market_date)) AS month_market_season_sort,
+  mdi.market_season,
+  mdi.market_year,
+  SUM(vi.quantity),
+  AVG(vi.original_price)
+FROM farmers_market.product AS p
+  LEFT JOIN farmers_market.vendor_inventory AS vi
+    ON vi.product_id = p.product_id
+  LEFT JOIN farmers_market.market_date_info AS mdi
+    ON vi.market_date = mdi.market_date
+GROUP BY
+  p.product_id,
+  p.product_name,
+  p.product_category_id,
+  p.product_qty_type,
+  vi.vendor_id,
+  mdi.market_year,
+  mdi.market_season
+```
